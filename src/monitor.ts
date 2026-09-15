@@ -29,6 +29,12 @@ export interface ReconHealth {
   internalErrors: number;
   /** alert_* outcomes (e.g. raw-tier write failures). */
   alerts: number;
+  /**
+   * Scheduled-job failures (failed export, failed health check). Gated on an
+   * absolute count rather than a ratio: one per cron run can never register
+   * against beacon volume, and the export is the only permanent record.
+   */
+  infraAlerts: number;
   /** received that produced no terminal outcome. Must be 0. */
   unexpected: number;
   /**
@@ -106,10 +112,20 @@ const CALL_REJECTIONS = [
   "call_not_qualified",
   "call_bad_number_mapping",
   "call_not_configured",
+  // Budget refusals belong here too: a PBX that trips the per-IP limit is
+  // having its conversions dropped, which must not read as a healthy path.
+  "call_rate_limited",
 ] as const;
 
 /** `/call` outcomes that mean an attempted send failed. */
 const CALL_SEND_ERRORS = ["call_capi_error", "call_internal_error"] as const;
+
+/**
+ * Alerts raised by the scheduled jobs rather than by per-beacon work. Any
+ * occurrence is a failure: these fire once per cron run, so they can never
+ * reach a meaningful ratio against beacon volume.
+ */
+const INFRA_ALERTS = ["alert_export_failed", "alert_health_check_failed"] as const;
 
 /**
  * Reconcile ingest outcomes from raw `ingest_recon` rows. Pure, so the
@@ -145,6 +161,11 @@ export function computeReconHealth(
   const disabled = sum((o) => o === "disabled");
   const internalErrors = sum((o) => o === "reject_internal");
   const alerts = sum((o) => o.startsWith("alert_"));
+  // Scheduled-job failures are not proportional to beacon volume, so a ratio is
+  // the wrong instrument: one failed nightly export against a day of healthy
+  // traffic rounds to ~0 and stays under any sane ceiling, while the only
+  // durable record of that day never got written. Gate them on absolute count.
+  const infraAlerts = sum((o) => (INFRA_ALERTS as readonly string[]).includes(o));
 
   const accounted = counted + duplicates + rejects + disabled;
   // max(0, ...) so a ledger that over-accounts (a double-recorded beacon) shows
@@ -181,6 +202,7 @@ export function computeReconHealth(
     internalErrors === 0 &&
     unexpected === 0 &&
     received === accounted &&
+    infraAlerts === 0 &&
     alertRatio <= maxAlertRatio &&
     rejectRatio <= maxRejectRatio;
   // Both halves of the conversion path are gated: sends that failed *and* calls
@@ -201,6 +223,7 @@ export function computeReconHealth(
     disabled,
     internalErrors,
     alerts,
+    infraAlerts,
     unexpected,
     countedRatio,
     rejectRatio,

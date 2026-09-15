@@ -25,6 +25,11 @@ ADMIN_TOKEN="3333333333333333333333333333333333333333333333333333333333333333"
 # recognizes devices hashed under the old salt. Unset once the window passes.
 # IFA_HASH_SALT_PREV=""
 
+# Pepper for the coarse IP+hour frequency cap applied to LMT / child-directed
+# traffic. Kept separate from IFA_HASH_SALT so rotating that salt does not reset
+# the only cap that population has. Falls back to IFA_HASH_SALT when unset.
+# IP_CAP_SALT=""
+
 # Universal Ads CAPI bearer token [CONFIRM WITH UA]. Leave blank while
 # UA_CAPI_ENDPOINT is unset / UA_CAPI_MODE=test.
 UA_CAPI_API_KEY=""

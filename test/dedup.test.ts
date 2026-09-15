@@ -27,6 +27,38 @@ describe("DedupStore /check", () => {
     expect(await res.json()).toEqual({ duplicate: true });
   });
 
+  it("admits exactly one winner when the same key arrives concurrently", async () => {
+    // The whole dedup guarantee rests on the SELECT and the INSERT in /check
+    // running without an interleaving point: `SqlStorage.exec` is synchronous
+    // and there is no `await` between them, so a concurrent request cannot
+    // observe the gap. That is an undocumented runtime property, and nothing
+    // asserted it — if it ever stopped holding, every impression would be
+    // counted twice with the suite still green.
+    const { do: store } = makeStore();
+    const results = await Promise.all(
+      Array.from({ length: 25 }, () =>
+        store
+          .fetch(request("/check?key=same&ttl=86400"))
+          .then((r) => r.json() as Promise<{ duplicate: boolean }>),
+      ),
+    );
+    expect(results.filter((r) => !r.duplicate)).toHaveLength(1);
+    expect(results.filter((r) => r.duplicate)).toHaveLength(24);
+  });
+
+  it("keeps distinct keys independent under concurrency", async () => {
+    const { do: store, sql } = makeStore();
+    const results = await Promise.all(
+      Array.from({ length: 10 }, (_, i) =>
+        store
+          .fetch(request(`/check?key=k${i}&ttl=86400`))
+          .then((r) => r.json() as Promise<{ duplicate: boolean }>),
+      ),
+    );
+    expect(results.every((r) => !r.duplicate)).toBe(true);
+    expect(sql.seen.size).toBe(10);
+  });
+
   it("does not slide the window on repeats", async () => {
     // If the expiry were refreshed on every hit, a steadily-served device would
     // never expire and would be suppressed indefinitely.

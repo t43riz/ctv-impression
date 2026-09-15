@@ -94,6 +94,9 @@ MATCH_WINDOW_MINUTES = "60"
 QUALIFY_SECONDS = "60"
 # Per-IP beacon budget per minute; "0" disables rate limiting.
 RATE_LIMIT_PER_MINUTE = "120"
+# Per-IP /call budget per minute. The webhook body must be read before its HMAC
+# can be checked, so that read is work an unauthenticated caller can force.
+CALL_RATE_LIMIT_PER_MINUTE = "60"
 # CAPI_MODE: "test" posts to /v1/test_events (no ingestion). Flip to "live"
 # once the API key + event_group_id are confirmed.
 CAPI_MODE = "test"
@@ -131,6 +134,10 @@ RAW_RETENTION_DAYS = "31"
 # Deadline for reading a /call body (ms). Bounds an unauthenticated caller that
 # holds the connection open: the HMAC cannot be verified until the body lands.
 CALL_BODY_TIMEOUT_MS = "10000"
+# Echo match diagnostics (confidence, candidate count, gate) in the /call
+# response. Off in production: the candidate count discloses a creative's
+# in-window delivery volume to any caller that reaches the endpoint.
+CALL_DEBUG_RESPONSE = "false"
 # Health-alert ceilings (fractions, 0..1) used by the recon health check. Each
 # falls back to these defaults when unset or unparseable.
 HEALTH_MAX_REJECT_RATIO = "0.5"

@@ -190,6 +190,80 @@ function makeCallEnv(over: Partial<Record<string, unknown>> = {}): CallHarness {
   return { env, seen: sql.seen, recon, request };
 }
 
+describe("handleCall error boundary", () => {
+  it("records an outcome when the number registry read throws", async () => {
+    // The inner try can only start once the claim exists, so a KV outage used
+    // to escape to the runtime as a bare 500 with no ledger row at all — and a
+    // conversion path that records nothing reads as healthy.
+    const h = makeCallEnv({
+      NUMBERS: {
+        get: async () => {
+          throw new Error("kv unavailable");
+        },
+      },
+    });
+    const res = await handleCall(await h.request(), h.env);
+
+    expect(res.status).toBe(502);
+    expect(await statusOf(res)).toBe("internal_error");
+    expect(callOutcomes(h.recon)).toEqual(["call_internal_error"]);
+  });
+
+  it("records an outcome when the idempotency claim throws", async () => {
+    const h = makeCallEnv({
+      DEDUP: fakeDoNamespace(async () => {
+        throw new Error("dedup do unavailable");
+      }),
+    });
+    const res = await handleCall(await h.request(), h.env);
+
+    expect(res.status).toBe(502);
+    expect(callOutcomes(h.recon)).toEqual(["call_internal_error"]);
+  });
+});
+
+describe("handleCall registry validation", () => {
+  const withMapping = (mapping: unknown) =>
+    makeCallEnv({
+      NUMBERS: fakeKv({ [`number:${DNIS}`]: JSON.stringify(mapping) }),
+    });
+
+  it("refuses a registry entry whose creative id is malformed", async () => {
+    // creativeId selects a Durable Object instance and forms part of the
+    // idempotency key, so it gets the same shape check as every other id.
+    const h = withMapping({ creativeId: "bad id!", campaignId: "camp1" });
+    const res = await handleCall(await h.request(), h.env);
+    expect(res.status).toBe(500);
+    expect(await statusOf(res)).toBe("bad_number_mapping");
+    expect(callOutcomes(h.recon)).toEqual(["call_bad_number_mapping"]);
+  });
+
+  it("refuses an out-of-range qualifySeconds instead of trusting it", async () => {
+    // A stray override silently redefines what counts as a billable call.
+    const h = withMapping({ creativeId: "cre1", campaignId: "camp1", qualifySeconds: -5 });
+    expect((await handleCall(await h.request(), h.env)).status).toBe(500);
+
+    const h2 = withMapping({
+      creativeId: "cre1",
+      campaignId: "camp1",
+      qualifySeconds: 999_999,
+    });
+    expect((await handleCall(await h2.request(), h2.env)).status).toBe(500);
+  });
+
+  it("refuses an unknown platform rather than defaulting it", async () => {
+    const h = withMapping({ creativeId: "cre1", campaignId: "camp1", platform: "tiktok" });
+    expect((await handleCall(await h.request(), h.env)).status).toBe(500);
+  });
+
+  it("still accepts a well-formed entry with a zero qualifySeconds", async () => {
+    // 0 is meaningful ("every call qualifies") and must survive validation.
+    const h = withMapping({ creativeId: "cre1", campaignId: "camp1", qualifySeconds: 0 });
+    const res = await handleCall(await h.request({ durationSeconds: 1 }), h.env);
+    expect(await statusOf(res)).not.toBe("bad_number_mapping");
+  });
+});
+
 describe("handleCall auth", () => {
   it("refuses every request when the signing key is still a placeholder", async () => {
     const h = makeCallEnv({ CALL_HMAC_KEY: "0".repeat(64) });

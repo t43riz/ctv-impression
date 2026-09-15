@@ -1,5 +1,5 @@
 import type { Env } from "./types";
-import { querySql, sqlString } from "./lib/sql";
+import { querySql, sqlString, sqlNumber } from "./lib/sql";
 
 /**
  * Reporting queries over the impression dataset.
@@ -29,7 +29,7 @@ export async function impressionsByCampaign(
       blob1 AS campaign_id,
       sum(_sample_interval) AS impressions
     FROM ${DATASET}
-    WHERE timestamp > now() - INTERVAL '${days}' DAY
+    WHERE timestamp > now() - INTERVAL '${sqlNumber(days)}' DAY
     GROUP BY campaign_id
     ORDER BY impressions DESC
     FORMAT JSON`;
@@ -51,7 +51,7 @@ export async function impressionsByCountry(
       blob4 AS country,
       sum(_sample_interval) AS impressions
     FROM ${DATASET}
-    WHERE timestamp > now() - INTERVAL '${hours}' HOUR
+    WHERE timestamp > now() - INTERVAL '${sqlNumber(hours)}' HOUR
     GROUP BY country
     ORDER BY impressions DESC
     FORMAT JSON`;
@@ -70,7 +70,7 @@ export async function hourlyTrend(env: Env, hours = 24): Promise<HourlyPoint[]> 
       toStartOfHour(timestamp) AS hour,
       sum(_sample_interval) AS impressions
     FROM ${DATASET}
-    WHERE timestamp > now() - INTERVAL '${hours}' HOUR
+    WHERE timestamp > now() - INTERVAL '${sqlNumber(hours)}' HOUR
     GROUP BY hour
     ORDER BY hour
     FORMAT JSON`;
@@ -98,7 +98,7 @@ export async function reachEstimate(
       blob1 AS campaign_id,
       count(DISTINCT blob3) AS unique_devices_estimate
     FROM ${DATASET}
-    WHERE timestamp > now() - INTERVAL '${days}' DAY
+    WHERE timestamp > now() - INTERVAL '${sqlNumber(days)}' DAY
       AND blob1 = ${sqlString(campaignId)}
       AND blob7 = '1'
     GROUP BY campaign_id
@@ -122,7 +122,7 @@ export async function reconSummary(env: Env, hours = 24): Promise<ReconRow[]> {
       blob1 AS outcome,
       sum(_sample_interval) AS events
     FROM ingest_recon
-    WHERE timestamp > now() - INTERVAL '${hours}' HOUR
+    WHERE timestamp > now() - INTERVAL '${sqlNumber(hours)}' HOUR
     GROUP BY outcome
     ORDER BY events DESC
     FORMAT JSON`;

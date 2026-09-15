@@ -78,9 +78,50 @@ export async function querySql<T = Record<string, unknown>>(
 }
 
 /**
- * Escape a string literal for embedding in WAE SQL. WAE has no parameter
- * binding, so we whitelist-validate IDs upstream and additionally escape here.
+ * Characters permitted inside a WAE string literal built by `sqlString`.
+ *
+ * Deliberately conservative. WAE is ClickHouse-derived, where a backslash is an
+ * escape *introducer* inside a literal, so doubling quotes alone is not a
+ * complete defense: a value ending in a backslash escapes the closing quote and
+ * the literal runs on into the query. Rather than chase escaping rules for a
+ * dialect with no parameter binding, reject anything outside the set every
+ * caller already validates against.
+ */
+const SQL_LITERAL_SAFE = /^[A-Za-z0-9_.:@ -]*$/;
+
+export class UnsafeSqlLiteralError extends Error {
+  constructor(value: string) {
+    super(
+      `refusing to interpolate an unsafe SQL literal (${JSON.stringify(value)}); ` +
+        "WAE has no parameter binding, so values must be validated upstream",
+    );
+    this.name = "UnsafeSqlLiteralError";
+  }
+}
+
+/**
+ * Quote a string literal for embedding in WAE SQL.
+ *
+ * Throws rather than escapes when the value falls outside the safe set. Every
+ * call site already gates on a narrow id pattern, so a rejection here means a
+ * new caller skipped that gate — which must fail loudly at the boundary instead
+ * of relying on an escaper to make arbitrary input safe.
  */
 export function sqlString(value: string): string {
+  if (!SQL_LITERAL_SAFE.test(value)) throw new UnsafeSqlLiteralError(value);
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+/**
+ * Interpolate a bare numeric value into SQL (row counts, INTERVAL operands).
+ *
+ * The reporting queries build `INTERVAL '${n}' DAY` by interpolation, which is
+ * safe only while every caller clamps first. This makes that requirement
+ * enforced at the point of use rather than assumed.
+ */
+export function sqlNumber(value: number): number {
+  if (!Number.isFinite(value)) {
+    throw new UnsafeSqlLiteralError(String(value));
+  }
+  return Math.floor(value);
 }

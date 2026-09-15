@@ -260,6 +260,12 @@ export async function nonAttributableDedupKey(
 ): Promise<string | null> {
   if (!enabled || !ip) return null;
   const hourBucket = Math.floor(nowSeconds / 3600);
-  const h = await hashIfa(env.IFA_HASH_SALT, `ip:${ip}:${hourBucket}`);
+  // Peppered with a dedicated secret when one is set, falling back to the IFA
+  // salt. Rotating the IFA salt is routine privacy hygiene, and sharing it here
+  // made every rotation silently reset the frequency cap on exactly the
+  // LMT/child-directed traffic that has no other cap — this key class has no
+  // previous-salt alias, so there is nothing to carry the old bucket across.
+  const pepper = env.IP_CAP_SALT?.trim() || env.IFA_HASH_SALT;
+  const h = await hashIfa(pepper, `ip:${ip}:${hourBucket}`);
   return `${h}|${imp.campaignId}|${imp.creativeId}`;
 }

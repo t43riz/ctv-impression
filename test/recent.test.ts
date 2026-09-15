@@ -53,6 +53,29 @@ describe("RecentImpressions /record", () => {
     }
   });
 
+  it("tracks a lowered window so retention cannot outlive the match window", async () => {
+    // The alarm purges against the *stored* window. Persisting only the first
+    // value ever seen meant lowering MATCH_WINDOW_MINUTES left the instance
+    // retaining raw IP/RIDA on the old, longer window while /match queried the
+    // new one — with no signal that the two had diverged.
+    const { do: store, kv, getAlarm } = makeStore();
+    await store.fetch(post("/record?window=60", rec()));
+    expect(kv.get("windowMin")).toBe(60);
+
+    await store.fetch(post("/record?window=15", rec()));
+    expect(kv.get("windowMin")).toBe(15);
+    // Re-armed immediately so the over-retained rows go on the next tick.
+    expect(getAlarm()).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("tracks a raised window without disarming the purge", async () => {
+    const { do: store, kv, getAlarm } = makeStore();
+    await store.fetch(post("/record?window=30", rec()));
+    await store.fetch(post("/record?window=90", rec()));
+    expect(kv.get("windowMin")).toBe(90);
+    expect(getAlarm()).not.toBeNull();
+  });
+
   it("records an LMT impression with no identifier stored", async () => {
     const { do: store, sql } = makeStore();
     await store.fetch(post("/record?window=60", rec({ lmt: true, rida: "", hhId: "" })));

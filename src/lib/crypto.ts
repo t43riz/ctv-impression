@@ -138,7 +138,7 @@ export async function hashIfaWithRotation(
 export async function verifyTimestampedSignature(
   secret: string,
   timestamp: string,
-  rawBody: string,
+  rawBody: string | Uint8Array,
   providedSig: string,
   nowSeconds: number,
   maxSkewSeconds: number,
@@ -151,8 +151,21 @@ export async function verifyTimestampedSignature(
   if (Math.abs(nowSeconds - ts) > maxSkewSeconds) {
     return { ok: false, reason: "expired" };
   }
-  const expected = await signMessage(secret, `${timestamp}.${rawBody}`);
-  if (!timingSafeEqual(expected, providedSig.toLowerCase())) {
+
+  // Sign over the body's original bytes rather than a decoded string. Decoding
+  // to text and re-encoding is lossy for any byte sequence that is not valid
+  // UTF-8 (it becomes U+FFFD), so a PBX emitting one would compute a signature
+  // we could never reproduce and get an unexplainable 401. Fails closed either
+  // way, but this way a legitimate sender is not locked out.
+  const prefix = encoder.encode(`${timestamp}.`);
+  const bodyBytes = typeof rawBody === "string" ? encoder.encode(rawBody) : rawBody;
+  const message = new Uint8Array(prefix.length + bodyBytes.length);
+  message.set(prefix, 0);
+  message.set(bodyBytes, prefix.length);
+
+  const key = await importHmacKey(secret);
+  const sig = await crypto.subtle.sign("HMAC", key, message);
+  if (!timingSafeEqual(toHex(sig), providedSig.toLowerCase())) {
     return { ok: false, reason: "bad_signature" };
   }
   return { ok: true };

@@ -149,13 +149,19 @@ async function handlePixel(
 
       // Record into the matching store for call attribution. This holds the RAW
       // ip/ifa (the conversion APIs need them unhashed) for the attribution
-      // window only. IDs are "" under LMT so opted-out devices are never
-      // device-matched.
+      // window only. Every device identifier is "" under LMT so opted-out
+      // devices are never device-matched.
+      //
+      // The IP follows the RIDA rather than being stored unconditionally: it is
+      // a device identifier for this purpose, the conversion clients withhold it
+      // under LMT anyway (src/lib/capi.ts, src/lib/capi_ua.ts), and a
+      // child-directed campaign forces LMT — so storing it would retain a
+      // child's device identifier for a send that provably never happens.
       const rawIfa = url.searchParams.get("ifa") ?? "";
       const rawHhId = url.searchParams.get("hh_id") ?? "";
       const rec: ImpressionRecord = {
         ts: nowSeconds,
-        ip: trueIp,
+        ip: imp.ifaPresent ? trueIp : "",
         rida: imp.ifaPresent ? rawIfa : "",
         hhId: imp.ifaPresent ? rawHhId : "",
         region: cfFull?.region ?? "",
@@ -201,6 +207,11 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
+    // Liveness only: this answers "is the isolate serving?", which is what the
+    // beacon path needs to stay up regardless of dependency state. Dependency
+    // health is a separate, authenticated question — see /admin/health, which
+    // returns 503 when reconciliation or export freshness fails. Keeping the
+    // two apart stops a degraded backend from pulling the pixel out of DNS.
     if (url.pathname === "/healthz") {
       return new Response("ok", { status: 200 });
     }
@@ -213,6 +224,19 @@ export default {
     }
 
     if (url.pathname === "/call") {
+      // The webhook is unauthenticated until its body has been read and the
+      // HMAC checked, so the read itself (64 KiB, up to CALL_BODY_TIMEOUT_MS)
+      // is work an anonymous caller can force. Budget it per IP the same way
+      // the beacon is, before any of that work starts. Fails open.
+      const callIp = request.headers.get("CF-Connecting-IP") ?? "";
+      const callBudget = configInt(env.CALL_RATE_LIMIT_PER_MINUTE, 60, 0);
+      if (!(await allowRequest(env.RATE, `call:${callIp}`, callBudget))) {
+        recordRecon(env, "call_rate_limited", "unknown");
+        return new Response(JSON.stringify({ status: "rate_limited" }), {
+          status: 429,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       return handleCall(request, env);
     }
 
@@ -227,27 +251,68 @@ export default {
     // "0 2 * * *"  -> daily export of yesterday's aggregates.
     // "30 3 * * *" -> health check written to _status/health.json for
     //                 external monitors (SPEC §7.1 alerts).
+    // Both branches are guarded: an unhandled rejection inside `waitUntil` is
+    // invisible, and `runExport` throws by design on a truncated read.
     if (event.cron === "30 3 * * *") {
       ctx.waitUntil(runHealthCheck(env));
       return;
     }
-    ctx.waitUntil(runExport(env, event.scheduledTime));
+    ctx.waitUntil(
+      runExport(env, event.scheduledTime).catch((err) => {
+        console.log(
+          "alert_export_failed",
+          err instanceof Error ? err.stack ?? err.message : String(err),
+        );
+        recordRecon(env, "alert_export_failed", "unknown");
+      }),
+    );
   },
 } satisfies ExportedHandler<Env>;
 
+/**
+ * Write the health artifact external monitors read.
+ *
+ * A failure here must publish a *red* artifact rather than propagate. The
+ * previous version let the Analytics SQL call throw straight into `waitUntil`,
+ * which skipped the `put` entirely and left the previous run's
+ * `healthy: true` in place — so a broken health check and a healthy system were
+ * indistinguishable to anything reading this file.
+ */
 async function runHealthCheck(env: Env): Promise<void> {
-  const [recon, exportFreshness] = await Promise.all([
-    checkReconHealth(env),
-    checkExportFreshness(env),
-  ]);
-  await env.ARCHIVE.put(
-    "_status/health.json",
-    JSON.stringify({
+  let body: Record<string, unknown>;
+  try {
+    const [recon, exportFreshness] = await Promise.all([
+      checkReconHealth(env),
+      checkExportFreshness(env),
+    ]);
+    body = {
       ts: new Date().toISOString(),
       healthy: recon.healthy && exportFreshness.fresh,
       recon,
       export: exportFreshness,
-    }),
-    { httpMetadata: { contentType: "application/json" } },
-  );
+    };
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.log("alert_health_check_failed", detail);
+    recordRecon(env, "alert_health_check_failed", "unknown");
+    body = {
+      ts: new Date().toISOString(),
+      healthy: false,
+      error: "health_check_failed",
+      detail,
+    };
+  }
+
+  try {
+    await env.ARCHIVE.put("_status/health.json", JSON.stringify(body), {
+      httpMetadata: { contentType: "application/json" },
+    });
+  } catch (err) {
+    // R2 itself is down. Nothing left to write the signal to; log so the
+    // failure is at least in Workers Logs rather than an unhandled rejection.
+    console.log(
+      "alert_health_write_failed",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
 }

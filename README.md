@@ -57,9 +57,11 @@ PBX (qualified call — phone number only, no device ID)
 | `INGEST_DISABLED` | `false` | `true` keeps serving the pixel but stops counting/matching (kill switch, DSA §2(b)) |
 | `DEDUP_NON_ATTRIBUTABLE` | `true` | Coarse salted-IP + hour frequency cap for LMT/child-directed/macro-polluted impressions |
 | `RATE_LIMIT_PER_MINUTE` | `120` | Per-IP beacon budget; `0` disables |
+| `CALL_RATE_LIMIT_PER_MINUTE` | `60` | Per-IP `/call` budget; the body must be read before its HMAC can be checked, so that read is work an anonymous caller can force |
 | `DEDUP_WINDOW_HOURS` | `24` | Impression dedup window |
 | `SIGNATURE_REQUIRED` | `true` | Require the HMAC tag signature |
 | `CALL_BODY_TIMEOUT_MS` | `10000` | Deadline for reading a `/call` body (the HMAC cannot be checked until it arrives) |
+| `CALL_DEBUG_RESPONSE` | `false` | Echo match diagnostics in the `/call` response; off in production because the candidate count discloses a creative's in-window delivery volume |
 
 Health ceilings are configurable too, each as a fraction of traffic
 (`HEALTH_MAX_REJECT_RATIO` `0.5`, `HEALTH_MAX_ALERT_RATIO` `0.01`,
@@ -181,11 +183,28 @@ GET  /admin/report/countries?hours=24        impressions by country
 GET  /admin/report/hourly?hours=24           hourly trend
 GET  /admin/report/reach?campaign=X&days=30  reach (estimate)
 POST /admin/backfill?date=YYYY-MM-DD         re-run a day's export
-POST /admin/dsar  {"ifa":"...","campaigns":["camp1"]}   DSAR erasure
+POST /admin/dsar  {"ifa":"..."}                          DSAR erasure
 ```
 
+`/admin/dsar` enumerates the `CAMPAIGNS` allowlist so the erasure covers every
+shard the subject could appear in. Supplying `{"campaigns":[...]}` narrows the
+scan and is answered **206** with `scope_complete: false`, because a
+caller-supplied list cannot be verified exhaustive — only the full enumeration
+returns a clean 200. A raw-tier object whose ownership cannot be verified still
+fails closed with a 500.
+
 A second cron (03:30 UTC) writes `_status/health.json` to the archive bucket
-for external monitors.
+for external monitors. A health check that cannot complete writes
+`healthy: false` with an `error` field rather than leaving the previous run's
+artifact in place, so a broken check and a healthy system are distinguishable.
+Both cron paths record `alert_export_failed` / `alert_health_check_failed` in
+the recon ledger, and those are gated on an **absolute count** — a once-per-run
+failure can never register as a ratio against beacon volume.
+
+> `/healthz` is **liveness only** and answers 200 whenever the isolate is
+> serving; that is deliberate, so a degraded backend cannot pull the pixel out
+> of DNS. Dependency health is the authenticated `/admin/health`, which returns
+> 503 when reconciliation or export freshness fails.
 
 ## Develop / test / deploy
 
@@ -242,4 +261,50 @@ npm run deploy
   (`terminalOutcomeRecorder`), unit-tested directly rather than only through a
   path that cannot reach the guard.
 - Secret placeholders (`REPLACE_WITH_*`, the `.dev.vars.example` keys) are
-  detected and refused rather than used to sign or send.
+  detected and refused rather than used to sign or send — including
+  `ADMIN_TOKEN`, so a deploy that never rotated the documented example value
+  cannot authenticate against reporting, backfill or DSAR erasure.
+- The matching store withholds the device **IP** as well as the RIDA/household
+  id whenever an impression is non-attributable (LMT, COPPA child-directed,
+  zeroed or macro-polluted IFA). The conversion clients already refuse to send
+  that IP, so storing it retained an opted-out device's identifier for a send
+  that provably never happens.
+- `/call` is wrapped in an **outer error boundary**: the number-registry read
+  and the idempotency claim sit before the inner `try`, so a KV or Durable
+  Object outage used to escape as a bare 500 with no ledger row — leaving the
+  conversion path silent and `callHealthy` green during exactly the failure the
+  ledger exists to surface.
+- Tracking-number registry entries are **validated at the trust boundary**. They
+  select a Durable Object instance, form part of an idempotency key, choose the
+  conversion platform, and set the billing threshold; an operator-entered
+  `qualifySeconds` is range-checked so a stray value cannot redefine what counts
+  as a billable call.
+- `sqlString` **rejects** rather than escapes anything outside a conservative
+  set. WAE is ClickHouse-derived, where a backslash escapes the closing quote,
+  so quote-doubling alone is incomplete and there is no parameter binding to
+  fall back on.
+- The `/call` webhook HMAC is computed over the body's **original bytes**.
+  Decoding to text and re-encoding is lossy for non-UTF-8 input, so a sender
+  emitting one byte we could not round-trip got an unexplainable 401.
+- The coarse IP frequency-cap key has its own pepper (`IP_CAP_SALT`). Sharing
+  `IFA_HASH_SALT` meant a routine salt rotation silently reset the only cap the
+  LMT/child-directed population has, since that key class has no previous-salt
+  alias.
+- `MATCH_WINDOW_MINUTES` changes are tracked by the matching store. It purges
+  against the **stored** window, so persisting only the first value ever seen
+  let a lowered window leave raw IP/RIDA retained on the old, longer one.
+
+## Known follow-on work
+
+- **Durable Object re-sharding.** `DEDUP` routes by `campaignId` and `RECENT` by
+  `creativeId`, so one campaign's burst funnels through a single-threaded
+  instance. Re-sharding by a hash-prefixed key is the fix, but it strands
+  existing rows on the old instances: dedup state is what prevents
+  double-counting, and stranded `RECENT` rows hold raw IP/RIDA on instances
+  whose purge alarm will never fire again. It needs a planned migration window,
+  not an in-place change.
+- **CI, lint and environment separation.** No `.github/` workflow, no lint
+  config, and a single unnamed `wrangler.toml` environment pointed at the
+  production custom domain.
+- **Alert delivery.** `_status/health.json` is written but nothing reads it; the
+  ledger signal does not yet reach a human.

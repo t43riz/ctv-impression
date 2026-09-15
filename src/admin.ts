@@ -7,7 +7,7 @@ import {
   reachEstimate,
 } from "./query";
 import { backfill } from "./export";
-import { hashIfa } from "./lib/crypto";
+import { hashIfa, isPlaceholderSecret } from "./lib/crypto";
 import { configInt } from "./lib/http";
 import { eraseByHash } from "./dedup";
 import { eraseRawByHash } from "./raw";
@@ -40,7 +40,11 @@ function json(body: unknown, status = 200): Response {
 
 /** Constant-time comparison; both sides hashed to fixed length first. */
 async function tokenOk(env: Env, header: string | null): Promise<boolean> {
-  if (!env.ADMIN_TOKEN || !header?.startsWith("Bearer ")) return false;
+  // A deploy still carrying the documented `.dev.vars.example` token has no
+  // secret at all: this surface exposes reporting, backfill and *destructive*
+  // DSAR erasure, so it must refuse a placeholder exactly as `/pixel` and
+  // `/call` do rather than authenticate a value published in the repository.
+  if (isPlaceholderSecret(env.ADMIN_TOKEN) || !header?.startsWith("Bearer ")) return false;
   const provided = header.slice(7);
   const enc = new TextEncoder();
   const [a, b] = await Promise.all([
@@ -56,6 +60,35 @@ async function tokenOk(env: Env, header: string | null): Promise<boolean> {
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** Safety bound on the campaign enumeration a single DSAR will walk. */
+const MAX_DSAR_CAMPAIGN_PAGES = 20;
+
+/**
+ * Enumerate allowlisted campaign ids from the CAMPAIGNS namespace.
+ *
+ * `complete` is false when the listing was cut short, so the caller can report
+ * a partial erasure instead of certifying a complete one.
+ */
+async function listCampaigns(env: Env): Promise<{ ids: string[]; complete: boolean }> {
+  const ids: string[] = [];
+  let cursor: string | undefined;
+
+  for (let page = 0; page < MAX_DSAR_CAMPAIGN_PAGES; page++) {
+    const res = await env.CAMPAIGNS.list({ prefix: "campaign:", cursor });
+    for (const k of res.keys) {
+      const id = k.name.slice("campaign:".length);
+      if (ID_RE.test(id)) ids.push(id);
+    }
+    if (res.list_complete) return { ids, complete: true };
+    cursor = res.cursor;
+    // A non-complete listing with no cursor cannot be advanced; stop rather
+    // than re-reading the same page forever.
+    if (!cursor) break;
+  }
+
+  return { ids, complete: false };
+}
 
 /**
  * Clamp a numeric query param into [min, max]. `Number(...) || fallback`
@@ -142,10 +175,33 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
       return json({ error: "bad json" }, 400);
     }
     const ifa = (body.ifa ?? "").trim();
-    const campaigns = (body.campaigns ?? []).filter((c) => ID_RE.test(c));
-    if (!ifa || campaigns.length === 0) {
-      return json({ error: "ifa and campaigns[] required (dedup is sharded by campaign)" }, 400);
+    if (!ifa) {
+      return json({ error: "ifa required" }, 400);
     }
+
+    // The dedup store is sharded by campaign, so an erasure is only complete if
+    // every campaign the subject could appear in is visited. A caller-supplied
+    // list cannot be verified, and silently skipping an omitted campaign while
+    // answering 200 would certify an erasure that did not happen. Enumerate the
+    // allowlist instead and treat the caller's list as an optional narrowing.
+    const requested = (body.campaigns ?? []).filter((c) => ID_RE.test(c));
+    const enumerated = await listCampaigns(env);
+    const campaigns = requested.length > 0 ? requested : enumerated.ids;
+
+    if (campaigns.length === 0) {
+      return json(
+        {
+          error: "no_campaigns",
+          note:
+            "No campaigns could be enumerated from the CAMPAIGNS namespace and none " +
+            "were supplied. THIS REQUEST IS NOT COMPLETE — do not record it as fulfilled.",
+        },
+        500,
+      );
+    }
+
+    // A truncated listing means the shard set is not provably complete.
+    const scopeComplete = requested.length > 0 ? false : enumerated.complete;
 
     // Locate by hash (PRIVACY §4): current salt, plus previous during rotation.
     const hashes = [await hashIfa(env.IFA_HASH_SALT, ifa)];
@@ -188,16 +244,45 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
       );
     }
 
+    const baseNote =
+      "RecentImpressions self-purges within the attribution window; " +
+      "AE rows expire in 3 months and hold only the hash; " +
+      "aggregates contain no identifiers. " +
+      `Raw tier scanned over ${raw.daysScanned} days (RAW_RETENTION_DAYS); ` +
+      "re-run if raw_tier.truncated. Coarse IP-derived frequency-cap keys in " +
+      "the dedup store are not IFA-addressable and expire with their TTL.";
+
+    // Partial scope is reported as 206, never as a clean 200: the raw tier
+    // already refuses to certify an unverifiable erase, and the dedup tier must
+    // not answer with more confidence than it has.
+    if (!scopeComplete) {
+      return json(
+        {
+          dedup_deleted: dedupDeleted,
+          raw_tier: raw,
+          campaigns_scanned: campaigns.length,
+          scope_complete: false,
+          note:
+            (requested.length > 0
+              ? "Erasure covered ONLY the campaigns supplied by the caller and the system " +
+                "cannot verify that list is exhaustive. Omit `campaigns` to erase across " +
+                "every allowlisted campaign. "
+              : "The CAMPAIGNS listing was truncated, so the campaign set is not provably " +
+                "complete. ") +
+            "THIS REQUEST MAY BE INCOMPLETE — verify scope before recording it as " +
+            "fulfilled. " +
+            baseNote,
+        },
+        206,
+      );
+    }
+
     return json({
       dedup_deleted: dedupDeleted,
       raw_tier: raw,
-      note:
-        "RecentImpressions self-purges within the attribution window; " +
-        "AE rows expire in 3 months and hold only the hash; " +
-        "aggregates contain no identifiers. " +
-        `Raw tier scanned over ${raw.daysScanned} days (RAW_RETENTION_DAYS); ` +
-        "re-run if raw_tier.truncated. Coarse IP-derived frequency-cap keys in " +
-        "the dedup store are not IFA-addressable and expire with their TTL.",
+      campaigns_scanned: campaigns.length,
+      scope_complete: true,
+      note: baseNote,
     });
   }
 

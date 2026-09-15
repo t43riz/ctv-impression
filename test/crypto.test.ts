@@ -147,4 +147,37 @@ describe("timestamped webhook signatures", () => {
       reason: "bad_signature",
     });
   });
+
+  it("verifies a body that is not valid UTF-8 from its original bytes", async () => {
+    // A lone 0x80 is not valid UTF-8. Decoding the body to text and
+    // re-encoding replaces it with U+FFFD, so the HMAC computed over the
+    // decoded form can never reproduce the sender's — a legitimate PBX would
+    // get an unexplainable 401. Signing the raw bytes keeps them intact.
+    const bytes = new Uint8Array([0x7b, 0x80, 0x7d]); // { <0x80> }
+    const prefix = new TextEncoder().encode(`${TS}.`);
+    const message = new Uint8Array(prefix.length + bytes.length);
+    message.set(prefix, 0);
+    message.set(bytes, prefix.length);
+
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(KEY),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const mac = await crypto.subtle.sign("HMAC", key, message);
+    const sig = [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+    expect(await verifyTimestampedSignature(KEY, TS, bytes, sig, NOW, 300)).toEqual({
+      ok: true,
+    });
+
+    // The lossy path must not validate against the same signature.
+    const decoded = new TextDecoder().decode(bytes);
+    expect(await verifyTimestampedSignature(KEY, TS, decoded, sig, NOW, 300)).toEqual({
+      ok: false,
+      reason: "bad_signature",
+    });
+  });
 });

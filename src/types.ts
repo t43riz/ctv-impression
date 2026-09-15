@@ -30,6 +30,10 @@ export interface Env {
   HMAC_SIGNING_KEY: string;
   IFA_HASH_SALT: string;
   IFA_HASH_SALT_PREV?: string; // previous salt during a rotation window
+  // Pepper for the coarse IP+hour frequency-cap key. Kept separate from
+  // IFA_HASH_SALT so rotating that salt does not reset the only cap the
+  // LMT/child-directed population has. Falls back to IFA_HASH_SALT when unset.
+  IP_CAP_SALT?: string;
   CALL_HMAC_KEY: string; // shared key the PBX signs /call payloads with
   CAPI_API_KEY: string; // Roku CAPI bearer token
   UA_CAPI_API_KEY?: string; // Universal Ads CAPI bearer token [CONFIRM WITH UA]
@@ -44,6 +48,9 @@ export interface Env {
   CAPI_EVENT_GROUP_ID: string; // default event_group_id
   CAPI_EVENT_NAME: string; // default event_name (e.g. "LEAD")
   RATE_LIMIT_PER_MINUTE: string; // per-IP beacon budget; "0" disables
+  // Per-IP /call budget. The body read happens before the HMAC can be checked,
+  // so it is work an unauthenticated caller can force. "0" disables.
+  CALL_RATE_LIMIT_PER_MINUTE?: string; // default 60
   UA_CAPI_ENDPOINT?: string; // UA CAPI base URL [CONFIRM WITH UA]
   UA_CAPI_MODE?: string; // "test" (default) or "live"
 
@@ -76,6 +83,10 @@ export interface Env {
   // Deadline (ms) for reading a /call webhook body. Bounds unauthenticated
   // slow-loris reads; the HMAC cannot be checked until the body arrives.
   CALL_BODY_TIMEOUT_MS?: string; // default 10000
+  // "true" echoes match diagnostics (confidence, candidate count, gate) in the
+  // /call response. Off by default: the candidate count reveals a creative's
+  // in-window delivery volume to anyone who can reach the endpoint.
+  CALL_DEBUG_RESPONSE?: string;
 
   // --- Alert thresholds (monitor.ts) --------------------------------------
   // Ceilings used by computeReconHealth. Each accepts 0..1; unset, blank or

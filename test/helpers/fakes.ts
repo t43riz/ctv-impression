@@ -23,13 +23,34 @@ export function fakeSql() {
 
   const norm = (q: string) => q.replace(/\s+/g, " ").trim();
   const cursor = (rows: Row[]): FakeCursor => ({ toArray: () => rows });
+
   /**
-   * DedupStore's /erase passes `LIKE '${escapedPrefix}%' ESCAPE '\'`, i.e. an
-   * escaped literal followed by exactly one wildcard. Unescape the literal part
-   * and drop the wildcard.
+   * Model SQL `LIKE ... ESCAPE '\'` semantics for real.
+   *
+   * A previous version collapsed the pattern to a literal prefix and used
+   * `startsWith`, which has no wildcard behaviour at all — so the tests
+   * asserting that `%` and `_` in a DSAR prefix are treated literally passed
+   * whether or not `DedupStore` escaped them. That made a guard against
+   * over-deleting another subject's dedup rows unfalsifiable. Compile the
+   * pattern to a regex instead: `%` spans any run, `_` matches one character,
+   * and a backslash-escaped wildcard is a literal.
    */
-  const likePrefix = (pattern: string) =>
-    pattern.slice(0, -1).replace(/\\(.)/g, "$1");
+  const likeMatcher = (pattern: string): ((k: string) => boolean) => {
+    let re = "";
+    for (let i = 0; i < pattern.length; i++) {
+      const ch = pattern[i];
+      if (ch === "\\") {
+        const next = pattern[++i];
+        if (next !== undefined) re += next.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        continue;
+      }
+      if (ch === "%") re += "[\\s\\S]*";
+      else if (ch === "_") re += "[\\s\\S]";
+      else re += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+    const compiled = new RegExp(`^${re}$`);
+    return (k: string) => compiled.test(k);
+  };
 
   function exec(query: string, ...params: unknown[]): FakeCursor {
     const q = norm(query);
@@ -40,10 +61,10 @@ export function fakeSql() {
 
     // --- DedupStore -------------------------------------------------------
     if (q === "DELETE FROM seen WHERE k LIKE ? ESCAPE '\\'") {
-      const prefix = likePrefix(String(params[0]));
+      const matches = likeMatcher(String(params[0]));
       let n = 0;
       for (const k of [...seen.keys()]) {
-        if (k.startsWith(prefix)) {
+        if (matches(k)) {
           seen.delete(k);
           n++;
         }
@@ -127,9 +148,11 @@ export function fakeSql() {
   return { exec, seen, imp };
 }
 
+export type FakeSql = ReturnType<typeof fakeSql>;
+
 export interface FakeDoState {
   state: DurableObjectState;
-  sql: ReturnType<typeof fakeSql>;
+  sql: FakeSql;
   kv: Map<string, unknown>;
   getAlarm: () => number | null;
 }
@@ -204,15 +227,27 @@ export function fakeDoNamespace(
   } as unknown as DurableObjectNamespace;
 }
 
+export interface FakeKvListResult {
+  keys: { name: string }[];
+  list_complete: boolean;
+  cursor?: string;
+}
+
 export interface FakeKv {
   get(key: string): Promise<string | null>;
   put(key: string, value: string): Promise<void>;
   delete(key: string): Promise<void>;
-  list(): Promise<{ keys: { name: string }[]; list_complete: boolean }>;
+  list(opts?: { prefix?: string; cursor?: string; limit?: number }): Promise<FakeKvListResult>;
   map: Map<string, string>;
 }
 
-export function fakeKv(initial: Record<string, string> = {}): FakeKv {
+/**
+ * KV stand-in. `list` honours `prefix`, `cursor` and `limit` because the DSAR
+ * campaign enumeration depends on all three: a fake that returned every key in
+ * one complete page could never exercise the truncated-listing path, which is
+ * the one that must downgrade a DSAR to a partial result.
+ */
+export function fakeKv(initial: Record<string, string> = {}, pageSize = 1000): FakeKv {
   const map = new Map(Object.entries(initial));
   return {
     map,
@@ -225,8 +260,20 @@ export function fakeKv(initial: Record<string, string> = {}): FakeKv {
     async delete(key) {
       map.delete(key);
     },
-    async list() {
-      return { keys: [...map.keys()].map((name) => ({ name })), list_complete: true };
+    async list(opts = {}) {
+      const matching = [...map.keys()]
+        .filter((k) => !opts.prefix || k.startsWith(opts.prefix))
+        .sort();
+      const start = opts.cursor ? Number(opts.cursor) : 0;
+      const limit = opts.limit ?? pageSize;
+      const slice = matching.slice(start, start + limit);
+      const next = start + limit;
+      const listComplete = next >= matching.length;
+      return {
+        keys: slice.map((name) => ({ name })),
+        list_complete: listComplete,
+        cursor: listComplete ? undefined : String(next),
+      };
     },
   };
 }

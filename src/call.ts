@@ -74,6 +74,50 @@ const CALL_BODY_READ_TIMEOUT_MS = 10_000;
 const CALL_ID_MAX_LEN = 128;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 
+/** Same id shape the beacon path enforces. */
+const MAPPING_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * Upper bound on a per-number qualification override. A registry entry is
+ * operator-entered and reaches this code unvalidated otherwise, so a stray
+ * `qualifySeconds` would silently redefine what counts as a billable call.
+ */
+const MAX_QUALIFY_SECONDS = 86_400;
+
+/**
+ * Validate a tracking-number registry entry before any of it is trusted.
+ *
+ * These fields select a Durable Object instance (`creativeId`), form part of an
+ * idempotency key, choose the conversion platform, and set the billing
+ * threshold. Every other identifier in the system is shape-checked; this one
+ * arrives from an operational KV write, which is exactly where a typo lands.
+ */
+export function isValidNumberMapping(m: unknown): m is NumberMapping {
+  if (m === null || typeof m !== "object") return false;
+  const v = m as Partial<NumberMapping>;
+
+  if (!MAPPING_ID_RE.test(v.creativeId ?? "")) return false;
+  if (v.campaignId !== undefined && !MAPPING_ID_RE.test(v.campaignId)) return false;
+  if (v.advertiserId !== undefined && !MAPPING_ID_RE.test(v.advertiserId)) return false;
+  if (v.platform !== undefined && v.platform !== "roku" && v.platform !== "ua") return false;
+  if (v.eventGroupId !== undefined && !MAPPING_ID_RE.test(v.eventGroupId)) return false;
+
+  if (v.qualifySeconds !== undefined) {
+    // A 0 is meaningful ("every call qualifies") and is kept, but it has to be
+    // a deliberate, in-range number rather than whatever JSON supplied.
+    if (
+      typeof v.qualifySeconds !== "number" ||
+      !Number.isFinite(v.qualifySeconds) ||
+      v.qualifySeconds < 0 ||
+      v.qualifySeconds > MAX_QUALIFY_SECONDS
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 export interface CallValidation {
   ok: boolean;
   reason?: "bad_json" | "missing_fields" | "bad_fields";
@@ -145,7 +189,30 @@ export function validateCallEvent(raw: string, nowSeconds: number): CallValidati
   return { ok: true, call: c as CallEvent };
 }
 
+/**
+ * Outer error boundary for the whole conversion path.
+ *
+ * The inner handler's `try` can only start after the idempotency claim exists,
+ * so the I/O before it (the NUMBERS registry read and the claim itself) used to
+ * throw straight past it: the runtime answered a bare 500 and *no* `call_*`
+ * ledger row was written. A KV or Durable Object outage — exactly what the
+ * ledger exists to surface — therefore left `callAttempts` flat and
+ * `callHealthy` green. Every exit from `/call` must leave an outcome behind.
+ */
 export async function handleCall(request: Request, env: Env): Promise<Response> {
+  try {
+    return await handleCallInner(request, env);
+  } catch (err) {
+    console.log(
+      "call_internal_error stage=pre_claim",
+      err instanceof Error ? err.stack ?? err.message : String(err),
+    );
+    recordCallOutcome(env, "internal_error", "unknown");
+    return json({ status: "internal_error" }, 502);
+  }
+}
+
+async function handleCallInner(request: Request, env: Env): Promise<Response> {
   if (request.method !== "POST") return json({ status: "method_not_allowed" }, 405);
 
   // A placeholder signing key means anyone can forge a webhook.
@@ -184,7 +251,7 @@ export async function handleCall(request: Request, env: Env): Promise<Response> 
   const auth = await verifyTimestampedSignature(
     env.CALL_HMAC_KEY,
     timestamp,
-    raw,
+    read.bytes,
     sig,
     nowSeconds,
     maxSkew,
@@ -214,7 +281,7 @@ export async function handleCall(request: Request, env: Env): Promise<Response> 
     recordCallOutcome(env, "bad_number_mapping", "unknown");
     return json({ status: "bad_number_mapping" }, 500);
   }
-  if (!mapping?.creativeId) {
+  if (!isValidNumberMapping(mapping)) {
     recordCallOutcome(env, "bad_number_mapping", "unknown");
     return json({ status: "bad_number_mapping" }, 500);
   }
@@ -277,17 +344,27 @@ export async function handleCall(request: Request, env: Env): Promise<Response> 
         ? await sendToUaCapi(env, await buildUaCapiPayload(env, call, mapping, match))
         : await sendToCapi(env, await buildCapiPayload(env, call, mapping, match));
 
+    // `candidates` is the count of impressions this creative served inside the
+    // match window. Returned to the caller it is an inventory oracle — anyone
+    // able to replay a still-valid signed webhook could poll a competitor's
+    // delivery rate — so it is reported in the recon ledger and logs, and only
+    // echoed back when CALL_DEBUG_RESPONSE is explicitly enabled.
+    const debug = env.CALL_DEBUG_RESPONSE === "true";
     const summary = {
       matched: match.matched,
       // Only report a score when one was computed: the candidate-ceiling
       // short-circuit returns 0 without evaluating anything, and a bare 0 in a
       // log or dashboard is indistinguishable from a real (and impossible)
       // zero score on a matched candidate.
-      ...(match.gate === "too_many_candidates"
-        ? { confidenceOmitted: "candidate_ceiling" }
-        : { confidence: match.confidence }),
-      candidates: match.candidateCount,
-      gate: match.gate,
+      ...(debug
+        ? {
+            ...(match.gate === "too_many_candidates"
+              ? { confidenceOmitted: "candidate_ceiling" }
+              : { confidence: match.confidence }),
+            candidates: match.candidateCount,
+            gate: match.gate,
+          }
+        : {}),
     };
 
     if (capi.skipped) {
@@ -369,7 +446,7 @@ export async function handleCall(request: Request, env: Env): Promise<Response> 
  * distinct so the caller can answer 413 vs 400 and record the right outcome.
  */
 export type BodyRead =
-  | { ok: true; text: string }
+  | { ok: true; text: string; bytes: Uint8Array }
   | { ok: false; reason: "too_large" | "timeout" | "read_error" };
 
 /** Sentinel rejected by the deadline, so a timeout is distinguishable. */
@@ -394,7 +471,7 @@ async function readBoundedText(
   timeoutMs: number,
 ): Promise<BodyRead> {
   const body = request.body;
-  if (body === null) return { ok: true, text: "" };
+  if (body === null) return { ok: true, text: "", bytes: new Uint8Array(0) };
 
   const reader = body.getReader();
   const chunks: Uint8Array[] = [];
@@ -430,7 +507,9 @@ async function readBoundedText(
     merged.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return { ok: true, text: new TextDecoder().decode(merged) };
+  // Both forms are returned: the bytes are what the HMAC covers, the text is
+  // what JSON parsing consumes.
+  return { ok: true, text: new TextDecoder().decode(merged), bytes: merged };
 }
 
 /**

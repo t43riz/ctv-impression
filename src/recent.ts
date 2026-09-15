@@ -181,12 +181,27 @@ export class RecentImpressions implements DurableObject {
     }
   }
 
+  /**
+   * Persist the window this instance retains on, and keep the purge alarm armed.
+   *
+   * The stored window is what `alarm()` purges against, so it has to track the
+   * configured value. Lowering `MATCH_WINDOW_MINUTES` previously left the
+   * instance purging on the *first* window it ever saw while `/match` queried
+   * the new, shorter one: raw IP/RIDA then outlived the attribution window the
+   * operator had asked for, with no signal. When the window shrinks the alarm is
+   * re-armed immediately so the longer-retained rows are dropped on the next
+   * tick rather than at the old cadence.
+   */
   private async ensureAlarm(windowMin: number): Promise<void> {
     if (!Number.isFinite(windowMin) || windowMin <= 0) return;
-    await this.state.storage.put("windowMin", windowMin);
+    const stored = await this.state.storage.get<number>("windowMin");
+    const shrank = typeof stored === "number" && windowMin < stored;
+    if (stored !== windowMin) {
+      await this.state.storage.put("windowMin", windowMin);
+    }
     const current = await this.state.storage.getAlarm();
-    if (current === null) {
-      await this.state.storage.setAlarm(Date.now() + 5 * 60 * 1000);
+    if (current === null || shrank) {
+      await this.state.storage.setAlarm(Date.now() + (shrank ? 0 : 5 * 60 * 1000));
     }
   }
 }

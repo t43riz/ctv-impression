@@ -13,6 +13,7 @@ import {
   fakeCtx,
   type FakeAnalytics,
   type FakeR2,
+  type FakeSql,
   type RecordedFetch,
 } from "./helpers/fakes";
 
@@ -26,7 +27,9 @@ interface Harness {
   raw: FakeR2;
   archive: FakeR2;
   /** Matching-store DOs by creative, with their storage so tests can read it. */
-  recent: Map<string, { store: RecentImpressions; kv: Map<string, unknown> }>;
+  recent: Map<string, { store: RecentImpressions; kv: Map<string, unknown>; sql: FakeSql }>;
+  /** Rows the matching store actually persisted for a creative. */
+  recentRows(creativeId: string): Record<string, unknown>[];
   dedupShards: Map<string, DedupStore>;
   campaigns: ReturnType<typeof fakeKv>;
   /** Requests the Worker sent to the matching store, in order. */
@@ -37,7 +40,10 @@ interface Harness {
 
 function makeHarness(over: Partial<Record<string, unknown>> = {}): Harness {
   const dedupShards = new Map<string, DedupStore>();
-  const recent = new Map<string, { store: RecentImpressions; kv: Map<string, unknown> }>();
+  const recent = new Map<
+    string,
+    { store: RecentImpressions; kv: Map<string, unknown>; sql: FakeSql }
+  >();
   const rateLimits = new Map<string, RateLimiter>();
   const recentCalls: RecordedFetch[] = [];
   const rateCalls: RecordedFetch[] = [];
@@ -55,7 +61,7 @@ function makeHarness(over: Partial<Record<string, unknown>> = {}): Harness {
     let entry = recent.get(shard);
     if (!entry) {
       const state = fakeDoState();
-      entry = { store: new RecentImpressions(state.state), kv: state.kv };
+      entry = { store: new RecentImpressions(state.state), kv: state.kv, sql: state.sql };
       recent.set(shard, entry);
     }
     return entry.store.fetch(request);
@@ -92,7 +98,19 @@ function makeHarness(over: Partial<Record<string, unknown>> = {}): Harness {
     ...over,
   } as unknown as Env;
 
-  return { env, recon, analytics, raw, archive, recent, dedupShards, campaigns, recentCalls, rateCalls };
+  return {
+    env,
+    recon,
+    analytics,
+    raw,
+    archive,
+    recent,
+    dedupShards,
+    campaigns,
+    recentCalls,
+    rateCalls,
+    recentRows: (creativeId: string) => recent.get(creativeId)?.sql.imp ?? [],
+  };
 }
 
 function pixel(
@@ -261,6 +279,44 @@ describe("pixel ingest", () => {
     expect(row.ifa_present).toBe("0");
     expect(row.ifa_hash).toBe("anon");
     expect(h.analytics.points[0].blobs?.[2]).toBe("anon");
+  });
+
+  it("withholds the device IP from the matching store under LMT", async () => {
+    // An IP is a device identifier, and the conversion clients withhold it
+    // under LMT anyway — so storing it retains an opted-out device's identifier
+    // for a send that provably never happens.
+    const h = makeHarness();
+    await beacon(h.env, { ...baseParams, lmt: "1" });
+
+    const recorded = h.recentRows("cre1");
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].ip).toBe("");
+    expect(recorded[0].rida).toBe("");
+    expect(recorded[0].lmt).toBe(1);
+  });
+
+  it("withholds the device IP for a child-directed campaign", async () => {
+    // COPPA: the allowlist value forces LMT treatment, so the same suppression
+    // must apply to the highest-sensitivity population in the system.
+    const h = makeHarness();
+    h.campaigns.map.set("campaign:kids", "child_directed");
+    await beacon(h.env, { ...baseParams, campaign_id: "kids", lmt: "0" });
+
+    const recorded = h.recentRows("cre1");
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].ip).toBe("");
+    expect(recorded[0].rida).toBe("");
+  });
+
+  it("still records the IP for a consenting device", async () => {
+    // The suppression must be scoped to opted-out traffic: attribution depends
+    // on this IP for every other impression.
+    const h = makeHarness();
+    await beacon(h.env, baseParams);
+
+    const recorded = h.recentRows("cre1");
+    expect(recorded[0].ip).toBe(IP);
+    expect(recorded[0].lmt).toBe(0);
   });
 
   it("rejects a beacon for a campaign that is not allowlisted", async () => {
@@ -453,5 +509,66 @@ describe("worker routing", () => {
     const h = makeHarness();
     const res = await worker.fetch(new Request("https://tracker.example/nope"), h.env, fakeCtx().ctx);
     expect(res.status).toBe(404);
+  });
+
+  it("budgets /call per IP before reading the body", async () => {
+    // The body read (64 KiB, up to CALL_BODY_TIMEOUT_MS) happens before the
+    // HMAC can be verified, so it is work an anonymous caller can force.
+    const h = makeHarness({ CALL_RATE_LIMIT_PER_MINUTE: "1", CALL_HMAC_KEY: "a-real-key" });
+    const call = () =>
+      worker.fetch(
+        new Request("https://tracker.example/call", {
+          method: "POST",
+          headers: { "CF-Connecting-IP": IP },
+          body: "{}",
+        }),
+        h.env,
+        fakeCtx().ctx,
+      );
+
+    const first = await call();
+    const second = await call();
+
+    expect(second.status).toBe(429);
+    expect(first.status).not.toBe(429);
+    expect(outcomes(h.recon)).toContain("call_rate_limited");
+  });
+});
+
+describe("scheduled jobs", () => {
+  const run = async (env: Env, cron: string) => {
+    const { ctx, settle } = fakeCtx();
+    await worker.scheduled(
+      { cron, scheduledTime: Date.now() } as ScheduledController,
+      env,
+      ctx,
+    );
+    await settle();
+  };
+
+  it("writes a red health artifact when the health check itself fails", async () => {
+    // The check reads Analytics Engine over the network. Letting that throw
+    // into waitUntil skipped the put entirely and left the *previous* run's
+    // `healthy: true` in place, so a broken check and a healthy system looked
+    // identical to anything reading this file.
+    const h = makeHarness();
+    await h.archive.put("_status/health.json", JSON.stringify({ healthy: true, ts: "old" }));
+
+    await run(h.env, "30 3 * * *");
+
+    const written = JSON.parse(
+      (await (await h.archive.get("_status/health.json"))!.text()),
+    ) as { healthy: boolean; error?: string };
+    expect(written.healthy).toBe(false);
+    expect(written.error).toBe("health_check_failed");
+    expect(outcomes(h.recon)).toContain("alert_health_check_failed");
+  });
+
+  it("records an alert when the export fails instead of rejecting unhandled", async () => {
+    // runExport throws by design on a truncated read; an unguarded waitUntil
+    // turns that into an invisible unhandled rejection.
+    const h = makeHarness();
+    await run(h.env, "0 2 * * *");
+    expect(outcomes(h.recon)).toContain("alert_export_failed");
   });
 });

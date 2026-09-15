@@ -21,6 +21,43 @@ describe("computeReconHealth", () => {
     expect(h.healthy).toBe(true);
   });
 
+  it("fails on a single scheduled-job alert regardless of beacon volume", () => {
+    // A cron alert fires at most once per run, so against a day of healthy
+    // beacon traffic its ratio rounds to ~0 and clears any sane ceiling — while
+    // the only durable record of that day was never written. Gate on the count.
+    const h = computeReconHealth(
+      rows(["received", 1_000_000], ["counted", 1_000_000], ["alert_export_failed", 1]),
+    );
+    expect(h.infraAlerts).toBe(1);
+    expect(h.alertRatio).toBeLessThan(0.01); // would have passed the ratio gate
+    expect(h.healthy).toBe(false);
+  });
+
+  it("fails on a failed health check for the same reason", () => {
+    const h = computeReconHealth(
+      rows(["received", 500_000], ["counted", 500_000], ["alert_health_check_failed", 1]),
+    );
+    expect(h.infraAlerts).toBe(1);
+    expect(h.healthy).toBe(false);
+  });
+
+  it("does not treat per-beacon alerts as scheduled-job failures", () => {
+    // alert_raw_write_error is best-effort and proportional to traffic, so it
+    // stays on the ratio gate rather than failing the first occurrence.
+    const h = computeReconHealth(
+      rows(["received", 1000], ["counted", 1000], ["alert_raw_write_error", 1]),
+    );
+    expect(h.infraAlerts).toBe(0);
+    expect(h.healthy).toBe(true);
+  });
+
+  it("counts a /call budget refusal as a conversion-path rejection", () => {
+    const h = computeReconHealth(rows(["call_rate_limited", 10]));
+    expect(h.callRejections).toBe(10);
+    expect(h.callRejectRatio).toBe(1);
+    expect(h.healthy).toBe(false);
+  });
+
   it("tracks rejects separately instead of folding them into the counted ratio", () => {
     const h = computeReconHealth(
       rows(

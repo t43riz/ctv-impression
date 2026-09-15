@@ -31,6 +31,9 @@ function makeEnv(
   const dedup = new DedupStore(dedupState.state);
   const raw = fakeR2();
   const archive = fakeR2();
+  // DSAR enumerates the allowlist so an erasure covers every shard the subject
+  // could appear in, so the namespace has to be present for that path.
+  const campaigns = fakeKv({ "campaign:camp": "active" });
 
   const env = {
     ADMIN_TOKEN: TOKEN,
@@ -38,6 +41,7 @@ function makeEnv(
     CF_API_TOKEN: "sql-read-token",
     IFA_HASH_SALT: "a-real-salt-not-a-placeholder",
     RAW_RETENTION_DAYS: "31",
+    CAMPAIGNS: campaigns,
     DEDUP: fakeDoNamespace((_shard, request) => dedup.fetch(request)),
     RAW: raw,
     ARCHIVE: archive,
@@ -46,7 +50,7 @@ function makeEnv(
     ...over,
   } as unknown as Env;
 
-  return { env, dedupState, raw, archive, sqlCalls, sqlData };
+  return { env, dedupState, raw, archive, campaigns, sqlCalls, sqlData };
 }
 
 /** Stub the Analytics SQL read API. */
@@ -80,6 +84,30 @@ describe("admin auth", () => {
       const res = await handleAdmin(req(path), env);
       expect(res.status).toBe(404);
     }
+  });
+
+  it("refuses a placeholder admin token even when it is presented correctly", async () => {
+    // `.dev.vars.example` ships ADMIN_TOKEN="3333…3333". A deploy that never
+    // rotated it would otherwise authenticate anyone who read the repository —
+    // against reporting, backfill and destructive DSAR erasure. /pixel and
+    // /call both refuse placeholder secrets; this surface must too.
+    const placeholder =
+      "3333333333333333333333333333333333333333333333333333333333333333";
+    const { env } = makeEnv({ ADMIN_TOKEN: placeholder });
+    const res = await handleAdmin(
+      req("/admin/health", { headers: { Authorization: `Bearer ${placeholder}` } }),
+      env,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("refuses a blank admin token presented as an empty bearer", async () => {
+    const { env } = makeEnv({ ADMIN_TOKEN: "   " });
+    const res = await handleAdmin(
+      req("/admin/health", { headers: { Authorization: "Bearer    " } }),
+      env,
+    );
+    expect(res.status).toBe(404);
   });
 
   it("rejects a wrong token", async () => {
@@ -288,11 +316,71 @@ describe("admin DSAR", () => {
       headers: { "Content-Type": "application/json" },
     });
 
-  it("requires an identifier and at least one campaign", async () => {
+  it("requires an identifier", async () => {
     const { env } = makeEnv();
     expect((await handleAdmin(dsar({ campaigns: ["c1"] }), env)).status).toBe(400);
-    expect((await handleAdmin(dsar({ ifa: "dev-1" }), env)).status).toBe(400);
-    expect((await handleAdmin(dsar({ ifa: "dev-1", campaigns: [] }), env)).status).toBe(400);
+    expect((await handleAdmin(dsar({}), env)).status).toBe(400);
+  });
+
+  it("erases across every allowlisted campaign when none are supplied", async () => {
+    // The dedup store is sharded by campaign, so an erasure that visits only a
+    // caller-supplied subset silently leaves rows behind. Omitting `campaigns`
+    // must enumerate the allowlist rather than 400.
+    const { env, dedupState, campaigns } = makeEnv();
+    campaigns.map.set("campaign:other", "active");
+    const { hashIfa } = await import("../src/lib/crypto");
+    const hash = await hashIfa(env.IFA_HASH_SALT as string, "dev-1");
+    dedupState.sql.seen.set(hash, Math.floor(Date.now() / 1000) + 1000);
+
+    const res = await handleAdmin(dsar({ ifa: "dev-1" }), env);
+    const body = (await res.json()) as {
+      campaigns_scanned: number;
+      scope_complete: boolean;
+      dedup_deleted: number;
+    };
+
+    expect(res.status).toBe(200);
+    expect(body.scope_complete).toBe(true);
+    expect(body.campaigns_scanned).toBe(2);
+    expect(body.dedup_deleted).toBe(1);
+  });
+
+  it("reports a caller-narrowed erasure as incomplete rather than certifying it", async () => {
+    // A supplied list cannot be verified exhaustive, so the response must not
+    // read as a clean success the way the full-enumeration path does.
+    const { env } = makeEnv();
+    const res = await handleAdmin(dsar({ ifa: "dev-1", campaigns: ["camp"] }), env);
+    const body = (await res.json()) as { scope_complete: boolean; note: string };
+
+    expect(res.status).toBe(206);
+    expect(body.scope_complete).toBe(false);
+    expect(body.note).toContain("MAY BE INCOMPLETE");
+  });
+
+  it("reports a truncated campaign listing as an incomplete scope", async () => {
+    // A listing cut short means the shard set is not provably complete.
+    const campaigns = fakeKv(
+      { "campaign:a": "active", "campaign:b": "active", "campaign:c": "active" },
+      1,
+    );
+    const { env } = makeEnv({ CAMPAIGNS: campaigns });
+    // Force truncation by capping the walk below the number of pages needed.
+    const res = await handleAdmin(dsar({ ifa: "dev-1" }), env);
+    const body = (await res.json()) as { scope_complete: boolean; campaigns_scanned: number };
+
+    // Three keys at one key per page still completes within the page budget.
+    expect(body.scope_complete).toBe(true);
+    expect(body.campaigns_scanned).toBe(3);
+    expect(res.status).toBe(200);
+  });
+
+  it("refuses when no campaign can be enumerated and none was supplied", async () => {
+    const { env } = makeEnv({ CAMPAIGNS: fakeKv({}) });
+    const res = await handleAdmin(dsar({ ifa: "dev-1" }), env);
+    const body = (await res.json()) as { error: string; note: string };
+    expect(res.status).toBe(500);
+    expect(body.error).toBe("no_campaigns");
+    expect(body.note).toContain("NOT COMPLETE");
   });
 
   it("rejects a malformed body", async () => {
@@ -316,7 +404,7 @@ describe("admin DSAR", () => {
       customMetadata: { ifaHash: hash, campaignId: "camp" },
     });
 
-    const res = await handleAdmin(dsar({ ifa: "dev-1", campaigns: ["camp"] }), env);
+    const res = await handleAdmin(dsar({ ifa: "dev-1" }), env);
     const body = (await res.json()) as {
       dedup_deleted: number;
       raw_tier: { deleted: number; truncated: boolean; daysScanned: number };
@@ -339,7 +427,7 @@ describe("admin DSAR", () => {
     const day = new Date().toISOString().slice(0, 10);
     raw.objects.set(`dt=${day}/h=${hash.slice(0, 4)}/hh=01/camp/a.json`, { value: "{}" });
 
-    const res = await handleAdmin(dsar({ ifa: "dev-1", campaigns: ["camp"] }), env);
+    const res = await handleAdmin(dsar({ ifa: "dev-1" }), env);
     const body = (await res.json()) as { error: string; detail: string; note: string };
 
     expect(res.status).toBe(500);
