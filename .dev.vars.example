@@ -1,0 +1,30 @@
+# Copy to .dev.vars for local development (never commit .dev.vars).
+# Secrets in production are set with: wrangler secret put <NAME>
+
+# Account-scoped API token with "Account Analytics Read" permission.
+CF_API_TOKEN="your-analytics-read-token"
+ACCOUNT_ID="your-cloudflare-account-id"
+
+# Key used to HMAC-sign tag URLs. Generate: openssl rand -hex 32
+HMAC_SIGNING_KEY="0000000000000000000000000000000000000000000000000000000000000000"
+
+# Salt for hashing IFA before storage. Generate: openssl rand -hex 32
+IFA_HASH_SALT="1111111111111111111111111111111111111111111111111111111111111111"
+
+# Shared key the PBX uses to HMAC-sign /call webhook payloads. openssl rand -hex 32
+CALL_HMAC_KEY="2222222222222222222222222222222222222222222222222222222222222222"
+
+# Roku Conversions API bearer token (Ads Manager > Events > CAPI).
+# Leave blank while CAPI_MODE=test.
+CAPI_API_KEY=""
+
+# Bearer token protecting /admin/* routes. Generate: openssl rand -hex 32
+ADMIN_TOKEN="3333333333333333333333333333333333333333333333333333333333333333"
+
+# Previous IFA salt — set ONLY during a salt-rotation window so dedup
+# recognizes devices hashed under the old salt. Unset once the window passes.
+# IFA_HASH_SALT_PREV=""
+
+# Universal Ads CAPI bearer token [CONFIRM WITH UA]. Leave blank while
+# UA_CAPI_ENDPOINT is unset / UA_CAPI_MODE=test.
+UA_CAPI_API_KEY=""
