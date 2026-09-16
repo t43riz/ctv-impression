@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    // `cloudflare:test` only exists inside the pool's runtime, so its types are
+    // registered here rather than for the Node suite.
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-pool-workers"]
+  },
+  "include": ["./**/*.ts", "../../src/**/*.ts"]
+}

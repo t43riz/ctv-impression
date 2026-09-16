@@ -1,0 +1,149 @@
+name = "ctv-impression-tracker"
+main = "src/index.ts"
+compatibility_date = "2024-12-18"
+
+# Workers Logs: the ingest path logs reject reasons, CAPI failures, and
+# unhandled ingest errors (never every accepted beacon).
+[observability]
+enabled = true
+
+# Public beacon hostname handed to Roku. Must stay stable: DSA §2(b)(3) freezes
+# the pixel URL once Roku certifies it.
+[[routes]]
+pattern = "pixels.postbackx.com"
+custom_domain = true
+
+# ---------------------------------------------------------------------------
+# Analytics Engine (write path). NOTE: this binding is WRITE-ONLY.
+# Reads happen via the SQL API over HTTPS (see src/query.ts), not the binding.
+# ---------------------------------------------------------------------------
+[[analytics_engine_datasets]]
+binding = "ANALYTICS"
+dataset = "impression_events"
+
+# Reconciliation counter dataset (raw request counts, pre-sampling intent).
+[[analytics_engine_datasets]]
+binding = "RECON"
+dataset = "ingest_recon"
+
+# ---------------------------------------------------------------------------
+# R2 buckets
+# ---------------------------------------------------------------------------
+[[r2_buckets]]
+binding = "ARCHIVE"
+bucket_name = "impression-archive"
+
+[[r2_buckets]]
+binding = "RAW"
+bucket_name = "impression-raw"
+
+# ---------------------------------------------------------------------------
+# KV: campaign/creative allowlist + tracking-number registry
+# ---------------------------------------------------------------------------
+[[kv_namespaces]]
+binding = "CAMPAIGNS"
+id = "c2c34db402cd4220a3d724c2cc40e9e5"
+
+[[kv_namespaces]]
+binding = "NUMBERS"
+id = "08295a39c4414ff1a8490edeb645cb4d"
+
+# ---------------------------------------------------------------------------
+# Durable Objects: dedup/replay guard + recent-impression matching store
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "DEDUP"
+class_name = "DedupStore"
+
+[[durable_objects.bindings]]
+name = "RECENT"
+class_name = "RecentImpressions"
+
+[[durable_objects.bindings]]
+name = "RATE"
+class_name = "RateLimiter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DedupStore", "RecentImpressions"]
+
+[[migrations]]
+tag = "v2"
+new_classes = ["RateLimiter"]
+
+# ---------------------------------------------------------------------------
+# Scheduled jobs:
+#   02:00 UTC — daily export of yesterday's aggregates to R2
+#   03:30 UTC — health check (recon + export freshness) -> _status/health.json
+# ---------------------------------------------------------------------------
+[triggers]
+crons = ["0 2 * * *", "30 3 * * *"]
+
+# ---------------------------------------------------------------------------
+# Vars (non-secret). Secrets set via `wrangler secret put`:
+#   CF_API_TOKEN, ACCOUNT_ID, HMAC_SIGNING_KEY, IFA_HASH_SALT,
+#   CALL_HMAC_KEY, CAPI_API_KEY, ADMIN_TOKEN
+# Optional secrets:
+#   IFA_HASH_SALT_PREV (during a salt-rotation window)
+#   IP_CAP_SALT        (pepper for the coarse IP+hour frequency cap)
+#   UA_CAPI_API_KEY    (Universal Ads CAPI, once provisioned)
+#   ALERT_WEBHOOK_URL  (POSTed when the nightly health check is red; the URL is
+#                       itself the credential for most incident tools)
+# ---------------------------------------------------------------------------
+[vars]
+DEDUP_WINDOW_HOURS = "24"
+SIGNATURE_REQUIRED = "true"
+MATCH_WINDOW_MINUTES = "60"
+QUALIFY_SECONDS = "60"
+# Per-IP beacon budget per minute; "0" disables rate limiting.
+RATE_LIMIT_PER_MINUTE = "120"
+# Per-IP /call budget per minute. The webhook body must be read before its HMAC
+# can be checked, so that read is work an unauthenticated caller can force.
+CALL_RATE_LIMIT_PER_MINUTE = "60"
+# CAPI_MODE: "test" posts to /v1/test_events (no ingestion). Flip to "live"
+# once the API key + event_group_id are confirmed.
+CAPI_MODE = "test"
+CAPI_EVENT_GROUP_ID = "REPLACE_WITH_EVENT_GROUP_ID"
+CAPI_EVENT_NAME = "LEAD"
+# Universal Ads CAPI [CONFIRM WITH UA]: leave endpoint empty until provisioned;
+# the UA client skips all sends while unset.
+UA_CAPI_ENDPOINT = ""
+UA_CAPI_MODE = "test"
+
+# --- Correctness pass ------------------------------------------------------
+# Frequency cap for impressions with no usable identifier (LMT /
+# child-directed / zeroed IFA / unexpanded macro). Without it that traffic is
+# never deduplicated. Set "false" to disable the coarse IP+hour cap.
+DEDUP_NON_ATTRIBUTABLE = "true"
+# Global kill switch (DSA §2(b)). "true" keeps serving the pixel but stops
+# counting and matching.
+INGEST_DISABLED = "false"
+# Device identifiers are attached to a conversion only when the match clears
+# BOTH bounds; otherwise the event is sent phone-only.
+MIN_MATCH_CONFIDENCE = "0.6"
+MAX_MATCH_CANDIDATES = "10"
+# Outbound timeout + retry budget for the conversion APIs.
+HTTP_TIMEOUT_MS = "5000"
+CAPI_MAX_ATTEMPTS = "2"
+# UA's dedup key/window is unconfirmed ([CONFIRM WITH UA]), so a retry cannot be
+# assumed to be absorbed: UA defaults to a single attempt so a retry cannot
+# double-count a billable conversion. Raise once the window is documented.
+UA_CAPI_MAX_ATTEMPTS = "1"
+# /call replay protection and idempotency.
+CALL_MAX_SKEW_SECONDS = "300"
+CALL_DEDUP_HOURS = "48"
+# Raw-tier DSAR scan window. Must cover the bucket's lifecycle rule.
+RAW_RETENTION_DAYS = "31"
+# Deadline for reading a /call body (ms). Bounds an unauthenticated caller that
+# holds the connection open: the HMAC cannot be verified until the body lands.
+CALL_BODY_TIMEOUT_MS = "10000"
+# Echo match diagnostics (confidence, candidate count, gate) in the /call
+# response. Off in production: the candidate count discloses a creative's
+# in-window delivery volume to any caller that reaches the endpoint.
+CALL_DEBUG_RESPONSE = "false"
+# Health-alert ceilings (fractions, 0..1) used by the recon health check. Each
+# falls back to these defaults when unset or unparseable.
+HEALTH_MAX_REJECT_RATIO = "0.5"
+HEALTH_MAX_ALERT_RATIO = "0.01"
+HEALTH_MAX_CALL_ERROR_RATIO = "0.5"
+HEALTH_MAX_CALL_REJECT_RATIO = "0.5"

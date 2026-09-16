@@ -1,0 +1,24 @@
+{
+  "name": "ctv-impression-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Custom CTV impression tracking system on Cloudflare Workers + Analytics Engine + R2",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test/workers/tsconfig.json",
+    "test": "vitest run && vitest run --config vitest.workers.config.ts",
+    "test:node": "vitest run",
+    "test:workers": "vitest run --config vitest.workers.config.ts",
+    "test:watch": "vitest",
+    "sign": "node scripts/sign-url.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.5.0",
+    "@cloudflare/workers-types": "^4.20241218.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.0.0",
+    "wrangler": "^3.90.0"
+  }
+}
