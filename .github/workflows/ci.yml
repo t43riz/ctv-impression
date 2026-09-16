@@ -1,0 +1,51 @@
+name: CI
+
+# Deploys are not automated here on purpose: production serves a frozen beacon
+# URL under Roku DSA §2(b)(3), and `npm run deploy` targets the live custom
+# domain. This workflow only tells you whether a change is safe to deploy.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A superseded run on the same branch has nothing useful left to report.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - run: npm ci
+
+      # Covers both tsconfigs: the Worker source and the workerd test project.
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Two pools. The Node pool runs the fast unit suite against fakes; the
+      # workers pool runs the Durable Object specs on real workerd, where
+      # storage and concurrency behave as they do in production. A fake cannot
+      # falsify the dedup invariant, so both have to pass.
+      - name: Test (node pool)
+        run: npm run test:node
+
+      - name: Test (workers pool)
+        run: npm run test:workers
+
+      # wrangler environments inherit nothing, so [env.production] repeats every
+      # binding. This fails the build when the two drift — the failure would
+      # otherwise surface as an undefined binding in production only.
+      - name: Check wrangler env parity
+        run: npm run deploy:check

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Generate a signed /pixel tag URL for a campaign/creative.
+ * Generate a signed /v1/pixel tag URL for a campaign/creative.
  *
  * Usage:
  *   HMAC_SIGNING_KEY=... node scripts/sign-url.mjs \
@@ -77,4 +77,8 @@ const macroTail =
       "&app_id=[[[APPID]]]" +
       "&cb=[[[CACHEBUSTER]]]";
 
-console.log(`${base}/pixel?${params.toString()}${macroTail}`);
+// Emits the canonical versioned path. The signed message is
+// `advertiser|campaign|creative|exp` (src/lib/crypto.ts) and does not cover the
+// path, so tags already issued against "/pixel" keep verifying — that path
+// stays served as a permanent alias.
+console.log(`${base}/v1/pixel?${params.toString()}${macroTail}`);

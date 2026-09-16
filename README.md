@@ -22,7 +22,7 @@ beacons. Edge ingestion, real-time analytics, long-term archival.
 
 ```
 Roku device (RAF beacon)
-   └─ GET /pixel?... (HMAC-signed, macros filled)
+   └─ GET /v1/pixel?... (HMAC-signed, macros filled)
         └─ Cloudflare Worker (edge)
              1. validate + verify signature + allowlist
              2. honor LMT, hash IFA
@@ -94,7 +94,7 @@ beacon into one pseudo-device and silently discard the rest as duplicates.
 
 ```
 src/
-  index.ts        Worker entry: /pixel + /call + /admin/* + /healthz + crons
+  index.ts        Worker entry: /v1/pixel (+/pixel alias) + /call + /admin/* + /healthz + crons
   dedup.ts        DedupStore Durable Object (seen-key set + TTL purge + DSAR erase)
   recent.ts       RecentImpressions DO (window-scoped raw IP/IFA/hh_id for matching)
   ratelimit.ts    RateLimiter DO (per-IP fixed-window budget, fails open)
@@ -138,9 +138,13 @@ wrangler r2 bucket create impression-archive
 wrangler r2 bucket create impression-raw
 ```
 
-Set production secrets:
+Set production secrets (`--env production`, which is where the live Worker is
+configured):
 
 ```bash
+# REQUIRED. Without it every Analytics read fails, which takes down the reports,
+# the nightly export and the health check together — the Worker keeps accepting
+# beacons, so the outage is silent until someone asks for a number.
 wrangler secret put CF_API_TOKEN       # "Account Analytics Read" token
 wrangler secret put ACCOUNT_ID
 wrangler secret put HMAC_SIGNING_KEY    # openssl rand -hex 32
@@ -148,11 +152,30 @@ wrangler secret put IFA_HASH_SALT       # openssl rand -hex 32
 wrangler secret put CALL_HMAC_KEY       # openssl rand -hex 32 (PBX webhook)
 wrangler secret put CAPI_API_KEY        # Roku CAPI bearer (leave unset in test mode)
 wrangler secret put ADMIN_TOKEN         # openssl rand -hex 32 (protects /admin/*)
+# Pepper for the coarse IP+hour cap, the only frequency cap the LMT /
+# child-directed population has. Falls back to IFA_HASH_SALT when unset, which
+# couples the two: rotating the IFA salt would otherwise reset that cap.
+wrangler secret put IP_CAP_SALT         # openssl rand -hex 32
 # During a salt rotation window only:
 #   wrangler secret put IFA_HASH_SALT_PREV
 # Once Universal Ads provisions the CAPI:
 #   wrangler secret put UA_CAPI_API_KEY
+# Optional: POST target for a red nightly health result. The URL is itself the
+# credential for most incident tools, so it is a secret, not a var.
+#   wrangler secret put ALERT_WEBHOOK_URL
 ```
+
+Deploy:
+
+```bash
+npm run deploy          # wrangler deploy --env production
+npm run deploy:check    # fails if [env.production] has drifted from the top level
+```
+
+The custom domain lives only under `[env.production]`, so a bare
+`wrangler deploy` cannot reach the live hostname. Because a named wrangler
+environment inherits no bindings, `[env.production]` repeats all of them;
+`deploy:check` (also run in CI) is what keeps the two from silently diverging.
 
 Configure R2 lifecycle rules (retention enforcement, SPEC §7.3):
 
@@ -400,10 +423,9 @@ actually enforces it, and covers real SQLite `LIKE`/`ESCAPE` for the DSAR erase.
 
   Neither is a correctness problem at pilot volume; both are throughput
   ceilings, and the conversion-path one will bind first.
-- **CI, lint and environment separation.** No `.github/` workflow, no lint
-  config, and a single unnamed `wrangler.toml` environment pointed at the
-  production custom domain — so `wrangler deploy` from any working tree goes
-  straight to the live custom domain.
+- **Lint.** No lint config. CI (`.github/workflows/ci.yml`) runs the typecheck,
+  both test pools and the env-parity check on every push and PR, but nothing
+  enforces style.
 - **Alert delivery is opt-in.** Setting `ALERT_WEBHOOK_URL` POSTs a red nightly
   health result to an endpoint of your choice. Left unset, the result is only
   written to `_status/health.json`, which nothing reads on a schedule — so the

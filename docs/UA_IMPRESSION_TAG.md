@@ -56,7 +56,7 @@ field. Universal Ads / FreeWheel replaces the VAST macros at fire time.
 **Tag as delivered to UA (with macros unfilled):**
 
 ```
-https://tracker.example.com/pixel?advertiser_id=adv_acme&campaign_id=camp_spring24&creative_id=cre_30s_hero&exp=1735689600&sig=9f1c2a7b4e8d3056c1a9f4b2e7d80c5316a2b9f4e1c7d0a3b6e9f2c5d8a1b4e7f0&ifa=[IFA]&ifa_type=[IFATYPE]&lmt=[LIMITADTRACKING]&app_id=[APPBUNDLE]&cb=[CACHEBUSTING]
+https://tracker.example.com/v1/pixel?advertiser_id=adv_acme&campaign_id=camp_spring24&creative_id=cre_30s_hero&exp=1735689600&sig=9f1c2a7b4e8d3056c1a9f4b2e7d80c5316a2b9f4e1c7d0a3b6e9f2c5d8a1b4e7f0&ifa=[IFA]&ifa_type=[IFATYPE]&lmt=[LIMITADTRACKING]&app_id=[APPBUNDLE]&cb=[CACHEBUSTING]
 ```
 
 > The `sig` is a 64-char hex string; the real tag contains no spaces.
@@ -67,7 +67,7 @@ https://tracker.example.com/pixel?advertiser_id=adv_acme&campaign_id=camp_spring
 **Same tag, after UA/FreeWheel fills the macros on a real device:**
 
 ```
-https://tracker.example.com/pixel?advertiser_id=adv_acme&campaign_id=camp_spring24&creative_id=cre_30s_hero&exp=1735689600&sig=9f1c2a7b4e8d3056c1a9f4b2e7d80c5316a2b9f4e1c7d0a3b6e9f2c5d8a1b4e7f0&ifa=a1b2c3d4-e5f6-7890-abcd-ef1234567890&ifa_type=rida&lmt=0&app_id=com.example.channel&cb=8675309421
+https://tracker.example.com/v1/pixel?advertiser_id=adv_acme&campaign_id=camp_spring24&creative_id=cre_30s_hero&exp=1735689600&sig=9f1c2a7b4e8d3056c1a9f4b2e7d80c5316a2b9f4e1c7d0a3b6e9f2c5d8a1b4e7f0&ifa=a1b2c3d4-e5f6-7890-abcd-ef1234567890&ifa_type=rida&lmt=0&app_id=com.example.channel&cb=8675309421
 ```
 
 ### 2.1 Why some params are pre-filled by us
@@ -120,7 +120,7 @@ the device-level macros in §3.
  │  ad server (CTV / Linear)    │  Impression event → our tracker.
  └──────────────┬───────────────┘  Macros [IFA],[LIMITADTRACKING],
                 │                   [APPBUNDLE],[CACHEBUSTING] substituted here.
-                │  HTTPS GET /pixel?...
+                │  HTTPS GET /v1/pixel?...
                 ▼
  ┌──────────────────────────────────────────────┐
  │  Cloudflare Worker (nearest edge PoP)        │
@@ -157,7 +157,7 @@ mark the impression non-attributable.
 {
   "ts": "2026-01-15T18:42:07.512Z",
   "method": "GET",
-  "path": "/pixel",
+  "path": "/v1/pixel",
   "edge_pop": "LAX",
   "query": {
     "advertiser_id": "adv_acme",
@@ -241,7 +241,7 @@ extrapolates through analytics sampling.
 A quick manual test you can run yourself (returns a 1×1 GIF):
 
 ```
-curl -i "https://tracker.example.com/pixel?advertiser_id=adv_acme&campaign_id=camp_ua_test&creative_id=cre_test&exp=<future_unix>&sig=<provided>&ifa=test-device-001&lmt=0&app_id=com.example.channel&cb=12345"
+curl -i "https://tracker.example.com/v1/pixel?advertiser_id=adv_acme&campaign_id=camp_ua_test&creative_id=cre_test&exp=<future_unix>&sig=<provided>&ifa=test-device-001&lmt=0&app_id=com.example.channel&cb=12345"
 ```
 
 We will provide the matching `exp`/`sig` for the test campaign.

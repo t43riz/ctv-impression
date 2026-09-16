@@ -9,7 +9,22 @@ enabled = true
 
 # Public beacon hostname handed to Roku. Must stay stable: DSA §2(b)(3) freezes
 # the pixel URL once Roku certifies it.
-[[routes]]
+#
+# Declared under [env.production] rather than here, so a bare `wrangler deploy`
+# cannot reach the live domain. Deploy with:
+#
+#   npm run deploy            # -> --env production
+#
+# The env block re-declares every binding because wrangler environments do NOT
+# inherit them from the top level; a partial block would deploy a Worker missing
+# whatever it omitted. `name` is pinned to the existing Worker so the live
+# Durable Objects, secrets and custom domain stay attached — the default for a
+# named environment is `<name>-<env>`, which would have created a second, empty
+# Worker and orphaned the DEDUP/RECENT state that prevents double-counting.
+[env.production]
+name = "ctv-impression-tracker"
+
+[[env.production.routes]]
 pattern = "pixels.postbackx.com"
 custom_domain = true
 
@@ -143,6 +158,108 @@ CALL_BODY_TIMEOUT_MS = "10000"
 CALL_DEBUG_RESPONSE = "false"
 # Health-alert ceilings (fractions, 0..1) used by the recon health check. Each
 # falls back to these defaults when unset or unparseable.
+HEALTH_MAX_REJECT_RATIO = "0.5"
+HEALTH_MAX_ALERT_RATIO = "0.01"
+HEALTH_MAX_CALL_ERROR_RATIO = "0.5"
+HEALTH_MAX_CALL_REJECT_RATIO = "0.5"
+
+# ===========================================================================
+# [env.production]
+#
+# Everything below repeats the top-level configuration. That duplication is
+# required, not accidental: a named wrangler environment inherits NOTHING, so
+# any binding omitted here would be missing from the deployed Worker. Keep the
+# two in sync — `npm run deploy:check` diffs the resolved bindings against the
+# top level and fails when they drift.
+#
+# The top level is retained as the `wrangler dev` / test configuration; it no
+# longer carries the route, so it cannot serve production traffic.
+# ===========================================================================
+
+[[env.production.analytics_engine_datasets]]
+binding = "ANALYTICS"
+dataset = "impression_events"
+
+[[env.production.analytics_engine_datasets]]
+binding = "RECON"
+dataset = "ingest_recon"
+
+[[env.production.r2_buckets]]
+binding = "ARCHIVE"
+bucket_name = "impression-archive"
+
+[[env.production.r2_buckets]]
+binding = "RAW"
+bucket_name = "impression-raw"
+
+[[env.production.kv_namespaces]]
+binding = "CAMPAIGNS"
+id = "c2c34db402cd4220a3d724c2cc40e9e5"
+
+[[env.production.kv_namespaces]]
+binding = "NUMBERS"
+id = "08295a39c4414ff1a8490edeb645cb4d"
+
+[[env.production.durable_objects.bindings]]
+name = "DEDUP"
+class_name = "DedupStore"
+
+[[env.production.durable_objects.bindings]]
+name = "RECENT"
+class_name = "RecentImpressions"
+
+[[env.production.durable_objects.bindings]]
+name = "RATE"
+class_name = "RateLimiter"
+
+# Must match the top-level migration history exactly: these classes already
+# exist on this Worker, so re-declaring the same tags is a no-op rather than a
+# new migration.
+[[env.production.migrations]]
+tag = "v1"
+new_sqlite_classes = ["DedupStore", "RecentImpressions"]
+
+[[env.production.migrations]]
+tag = "v2"
+new_classes = ["RateLimiter"]
+
+[env.production.observability]
+enabled = true
+
+[env.production.triggers]
+crons = ["0 2 * * *", "30 3 * * *"]
+
+[env.production.vars]
+DEDUP_WINDOW_HOURS = "24"
+SIGNATURE_REQUIRED = "true"
+MATCH_WINDOW_MINUTES = "60"
+QUALIFY_SECONDS = "60"
+RATE_LIMIT_PER_MINUTE = "120"
+CALL_RATE_LIMIT_PER_MINUTE = "60"
+# Scoped per environment deliberately. Flipping the conversion path live is now
+# a change to THIS line only, so it cannot be enabled by editing a shared value
+# that `wrangler dev` and the tests also read.
+#
+# Do not set "live" until: (1) the CAPI entitlement question in
+# docs/ROKU_DSA_GAP_ANALYSIS.md B1/B2 is resolved in writing, (2) CAPI_API_KEY
+# is set, and (3) CAPI_EVENT_GROUP_ID below is a real value.
+CAPI_MODE = "test"
+CAPI_EVENT_GROUP_ID = "REPLACE_WITH_EVENT_GROUP_ID"
+CAPI_EVENT_NAME = "LEAD"
+UA_CAPI_ENDPOINT = ""
+UA_CAPI_MODE = "test"
+DEDUP_NON_ATTRIBUTABLE = "true"
+INGEST_DISABLED = "false"
+MIN_MATCH_CONFIDENCE = "0.6"
+MAX_MATCH_CANDIDATES = "10"
+HTTP_TIMEOUT_MS = "5000"
+CAPI_MAX_ATTEMPTS = "2"
+UA_CAPI_MAX_ATTEMPTS = "1"
+CALL_MAX_SKEW_SECONDS = "300"
+CALL_DEDUP_HOURS = "48"
+RAW_RETENTION_DAYS = "31"
+CALL_BODY_TIMEOUT_MS = "10000"
+CALL_DEBUG_RESPONSE = "false"
 HEALTH_MAX_REJECT_RATIO = "0.5"
 HEALTH_MAX_ALERT_RATIO = "0.01"
 HEALTH_MAX_CALL_ERROR_RATIO = "0.5"

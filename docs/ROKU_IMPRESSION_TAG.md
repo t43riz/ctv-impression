@@ -50,7 +50,7 @@ tracker field. Roku's RAF replaces the `[[[...]]]` macros at fire time.
 **Tag as delivered to Roku (with macros unfilled):**
 
 ```
-https://pixels.postbackx.com/pixel?advertiser_id=adv_udonis&campaign_id=camp_roku_test&creative_id=cre_roku_cert&exp=1797273063&sig=ab068b0ecb31b53bc801097e9d6159b9dc7eb338d9b8cb2bb7e08b929876b0cf&ifa=[[[RIDA]]]&lmt=[[[LMT]]]&app_id=[[[APPID]]]&cb=[[[CACHEBUSTER]]]
+https://pixels.postbackx.com/v1/pixel?advertiser_id=adv_udonis&campaign_id=camp_roku_test&creative_id=cre_roku_cert&exp=1797273063&sig=ab068b0ecb31b53bc801097e9d6159b9dc7eb338d9b8cb2bb7e08b929876b0cf&ifa=[[[RIDA]]]&lmt=[[[LMT]]]&app_id=[[[APPID]]]&cb=[[[CACHEBUSTER]]]
 ```
 
 > This is a **live** tag. It is signed, allowlisted, and serving now — you can
@@ -61,7 +61,7 @@ https://pixels.postbackx.com/pixel?advertiser_id=adv_udonis&campaign_id=camp_rok
 **Same tag, after RAF fills the macros on a real device:**
 
 ```
-https://pixels.postbackx.com/pixel?advertiser_id=adv_udonis&campaign_id=camp_roku_test&creative_id=cre_roku_cert&exp=1797273063&sig=ab068b0ecb31b53bc801097e9d6159b9dc7eb338d9b8cb2bb7e08b929876b0cf&ifa=a1b2c3d4-e5f6-7890-abcd-ef1234567890&lmt=0&app_id=12345&cb=8675309421
+https://pixels.postbackx.com/v1/pixel?advertiser_id=adv_udonis&campaign_id=camp_roku_test&creative_id=cre_roku_cert&exp=1797273063&sig=ab068b0ecb31b53bc801097e9d6159b9dc7eb338d9b8cb2bb7e08b929876b0cf&ifa=a1b2c3d4-e5f6-7890-abcd-ef1234567890&lmt=0&app_id=12345&cb=8675309421
 ```
 
 ### 2.1 Why some params are pre-filled by us
@@ -116,7 +116,7 @@ and the dedup window instead.
  │  Roku CTV Device     │  RAF renders ad, fires impression beacon.
  │  (RAF, watermarked)  │  Macros [[[RIDA]]],[[[LMT]]],[[[APPID]]],
  └──────────┬───────────┘  [[[CACHEBUSTER]]] are substituted here.
-            │  HTTPS GET /pixel?...
+            │  HTTPS GET /v1/pixel?...
             ▼
  ┌──────────────────────────────────────────────┐
  │  Cloudflare Worker (nearest edge PoP)        │
@@ -156,7 +156,7 @@ the same single impression at three stages.
 {
   "ts": "2025-01-15T18:42:07.512Z",
   "method": "GET",
-  "path": "/pixel",
+  "path": "/v1/pixel",
   "edge_pop": "LAX",
   "query": {
     "advertiser_id": "adv_acme",
@@ -244,7 +244,7 @@ correctly extrapolates through analytics sampling.
 A quick manual test you can run yourself (returns a 1×1 GIF):
 
 ```
-curl -i "https://pixels.postbackx.com/pixel?advertiser_id=adv_udonis&campaign_id=camp_roku_test&creative_id=cre_roku_cert&exp=1797273063&sig=ab068b0ecb31b53bc801097e9d6159b9dc7eb338d9b8cb2bb7e08b929876b0cf&ifa=test-device-001&lmt=0&app_id=12345&cb=12345"
+curl -i "https://pixels.postbackx.com/v1/pixel?advertiser_id=adv_udonis&campaign_id=camp_roku_test&creative_id=cre_roku_cert&exp=1797273063&sig=ab068b0ecb31b53bc801097e9d6159b9dc7eb338d9b8cb2bb7e08b929876b0cf&ifa=test-device-001&lmt=0&app_id=12345&cb=12345"
 ```
 
 No coordination needed — that command works right now.

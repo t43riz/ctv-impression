@@ -532,6 +532,70 @@ describe("worker routing", () => {
     expect(res.status).toBe(405);
   });
 
+  // DSA §2(b)(3) freezes the beacon URL at certification, so "/v1/pixel" is
+  // the canonical path and "/pixel" is a permanent alias. The alias can never
+  // be retired: it is baked into creatives served by devices that may never
+  // update. These assert the two paths are the same handler, not merely that
+  // both return 200 — an alias that silently skipped dedup or recon would
+  // double-count while looking healthy.
+  const pixelAt = (path: string) => {
+    const url = new URL(`https://tracker.example${path}`);
+    for (const [k, v] of Object.entries(baseParams)) url.searchParams.set(k, v);
+    const req = new Request(url.toString(), { headers: { "CF-Connecting-IP": IP } });
+    Object.defineProperty(req, "cf", {
+      value: { country: "US", region: "California", city: "SF" },
+      configurable: true,
+    });
+    return req;
+  };
+
+  const ingestVia = async (path: string) => {
+    const h = makeHarness();
+    const { ctx, settle } = fakeCtx();
+    const res = await worker.fetch(pixelAt(path), h.env, ctx);
+    await settle();
+    return { h, res };
+  };
+
+  it("serves the versioned pixel path identically to the unversioned alias", async () => {
+    const versioned = await ingestVia("/v1/pixel");
+    const alias = await ingestVia("/pixel");
+
+    for (const { res } of [versioned, alias]) {
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Content-Type")).toBe("image/gif");
+    }
+
+    // Same ledger, same counted impression, same hashed identifier: the alias
+    // reaches the full ingest path rather than a stub that just returns a GIF.
+    expect(outcomes(versioned.h.recon)).toEqual(["received", "counted"]);
+    expect(outcomes(alias.h.recon)).toEqual(outcomes(versioned.h.recon));
+    expect(versioned.h.analytics.points).toHaveLength(1);
+    expect(alias.h.analytics.points).toHaveLength(1);
+    expect(alias.h.analytics.points[0].blobs).toEqual(
+      versioned.h.analytics.points[0].blobs,
+    );
+  });
+
+  it("rejects a non-GET on the versioned pixel path", async () => {
+    const h = makeHarness();
+    const res = await worker.fetch(
+      new Request("https://tracker.example/v1/pixel", { method: "POST" }),
+      h.env,
+      fakeCtx().ctx,
+    );
+    expect(res.status).toBe(405);
+  });
+
+  it("does not serve an unreleased pixel version", async () => {
+    // Guards against matching on a prefix: only versions this Worker actually
+    // implements may answer, so a future "/v2/pixel" cannot be silently served
+    // by the v1 contract.
+    const h = makeHarness();
+    const res = await worker.fetch(pixelAt("/v2/pixel"), h.env, fakeCtx().ctx);
+    expect(res.status).toBe(404);
+  });
+
   it("404s an unknown path", async () => {
     const h = makeHarness();
     const res = await worker.fetch(new Request("https://tracker.example/nope"), h.env, fakeCtx().ctx);

@@ -222,7 +222,13 @@ export default {
       return new Response("ok", { status: 200 });
     }
 
-    if (url.pathname === "/pixel") {
+    // "/v1/pixel" is canonical; "/pixel" is a permanent alias. DSA §2(b)(3)
+    // freezes the beacon URL once Roku certifies it, so a breaking change to
+    // the query contract has to ship as "/v2/pixel" rather than a re-
+    // certification of this one. The unversioned path stays served forever:
+    // a CTV beacon is baked into ad creatives and served by devices that may
+    // never be updated, so it can never be retired once handed out.
+    if (url.pathname === "/v1/pixel" || url.pathname === "/pixel") {
       if (request.method !== "GET") {
         return new Response("Method Not Allowed", { status: 405 });
       }
