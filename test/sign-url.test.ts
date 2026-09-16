@@ -44,6 +44,14 @@ function sign(args: string[], key = KEY): { pathname: string; params: Record<str
   return { pathname: head.replace(/^https?:\/\/[^/]+/, ""), params };
 }
 
+/** The raw emitted URL, macro tail included. */
+function signRaw(args: string[], key = KEY): string {
+  return execFileSync("node", [SCRIPT, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, HMAC_SIGNING_KEY: key },
+  }).trim();
+}
+
 const baseArgs = [
   "--base",
   "https://pixels.example",
@@ -89,6 +97,28 @@ describe("sign-url.mjs interoperates with the Worker verifier", () => {
     // DSA §2(b)(3) freezes the beacon URL at certification, so the generator
     // must hand out the versioned path rather than the legacy alias.
     expect(sign(baseArgs).pathname).toBe("/v1/pixel");
+  });
+
+  it("emits every macro the Roku tag depends on", () => {
+    const url = signRaw(baseArgs);
+    // RAF has no ifa_type token and Roku's identifier is always a RIDA, so the
+    // namespace is sent as a literal. Omitting it leaves blob8 empty and makes
+    // platform mix unmeasurable — confirmed against production.
+    expect(url).toContain("&ifa_type=rida");
+    for (const macro of ["[[[RIDA]]]", "[[[LMT]]]", "[[[APPID]]]", "[[[CACHEBUSTER]]]"]) {
+      expect(url).toContain(macro);
+    }
+    // The UA tokens must not leak into a Roku tag.
+    expect(url).not.toContain("[IFA]");
+    expect(url).not.toContain("[LIMITADTRACKING]");
+  });
+
+  it("emits IAB macros, not Roku macros, for the UA platform", () => {
+    const url = signRaw([...baseArgs, "--platform", "ua"]);
+    expect(url).toContain("pf=ua");
+    expect(url).toContain("&ifa_type=[IFATYPE]");
+    expect(url).toContain("[LIMITADTRACKING]");
+    expect(url).not.toContain("[[[RIDA]]]");
   });
 
   it("binds the signature to the advertiser", async () => {

@@ -50,25 +50,24 @@ tracker field. Roku's RAF replaces the `[[[...]]]` macros at fire time.
 **Tag as delivered to Roku (with macros unfilled):**
 
 ```
-https://pixels.postbackx.com/v1/pixel?advertiser_id=adv_udonis&campaign_id=camp_roku_test&creative_id=cre_roku_cert&exp=1797273063&sig=ab068b0ecb31b53bc801097e9d6159b9dc7eb338d9b8cb2bb7e08b929876b0cf&ifa=[[[RIDA]]]&lmt=[[[LMT]]]&app_id=[[[APPID]]]&cb=[[[CACHEBUSTER]]]
+https://pixels.postbackx.com/v1/pixel?advertiser_id=adv_udonis&campaign_id=camp_roku_test&creative_id=cre_roku_cert&exp=1805121458&sig=3983d8b1fdd329a265499edd5868b182c5d0267c282a372b94ed6777a378b4b8&ifa=[[[RIDA]]]&ifa_type=rida&lmt=[[[LMT]]]&app_id=[[[APPID]]]&cb=[[[CACHEBUSTER]]]
 ```
 
-> ⚠️ **The `sig` above is an illustration, not a working signature** (see §2.1).
-> The endpoint returns a `200` and a 1×1 GIF for *every* request, including a
-> rejected one — that is deliberate, so the beacon never leaks validation state
-> to the device. The consequence is that firing a tag and getting a 200 proves
-> nothing: an invalid signature is recorded as `reject_bad_signature` and never
-> counted.
+> **This tag is verified live.** Fired against production on 2026-09-16, it
+> was recorded in the reconciliation ledger as `counted` (not
+> `reject_bad_signature`), and the signature is valid through **2027-03-15 14:37 UTC**
+> (`exp=1805121458`). Tell us the campaign flight dates and we will reissue with a
+> matching expiry.
 >
-> A tag is only demonstrably live once a beacon fired with it appears as
-> `counted` in the reconciliation ledger. Generate a real one with
-> `npm run sign -- --advertiser ... --campaign ... --creative ... --ttl ...`
-> and confirm it counted before handing it to anyone.
+> Note when testing: the endpoint returns `200` and a 1×1 GIF for *every*
+> request, including a rejected one. That is deliberate — the beacon must
+> never leak validation state to the device — so a `200` alone does not prove
+> an impression was counted. Confirmation comes from the ledger.
 
 **Same tag, after RAF fills the macros on a real device:**
 
 ```
-https://pixels.postbackx.com/v1/pixel?advertiser_id=adv_udonis&campaign_id=camp_roku_test&creative_id=cre_roku_cert&exp=1797273063&sig=ab068b0ecb31b53bc801097e9d6159b9dc7eb338d9b8cb2bb7e08b929876b0cf&ifa=a1b2c3d4-e5f6-7890-abcd-ef1234567890&lmt=0&app_id=12345&cb=8675309421
+https://pixels.postbackx.com/v1/pixel?advertiser_id=adv_udonis&campaign_id=camp_roku_test&creative_id=cre_roku_cert&exp=1805121458&sig=3983d8b1fdd329a265499edd5868b182c5d0267c282a372b94ed6777a378b4b8&ifa=a1b2c3d4-e5f6-7890-abcd-ef1234567890&ifa_type=rida&lmt=0&app_id=12345&cb=8675309421
 ```
 
 ### 2.1 Why some params are pre-filled by us
@@ -80,11 +79,13 @@ the per-creative tag for you** with `advertiser_id`, `campaign_id`,
 need to ensure RAF fills the device-level macros in §3.
 
 The signed message is `advertiser_id|campaign_id|creative_id|exp`, so the
-`sig` value depends on which advertiser the tag is issued to. The `sig` values in
-the examples above are illustrative; the real one comes from
+`sig` value depends on which advertiser the tag is issued to. The `sig` above is
+a real, ledger-verified signature for `adv_udonis`; reissue for any other
+advertiser, campaign or creative with
 `npm run sign -- --campaign ... --creative ... --advertiser ...`.
 `test/sign-url.test.ts` runs that generator against the Worker's own verifier,
-so the two cannot drift into emitting plausible-looking tags that are rejected. `ifa` and `lmt`
+so the two cannot drift into emitting plausible-looking tags that are rejected.
+`ifa` and `lmt`
 can never be covered by the signature — the ad server substitutes them on the
 device after the tag is served — so those are protected by the per-IP rate limit
 and the dedup window instead.

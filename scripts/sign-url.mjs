@@ -72,7 +72,13 @@ const macroTail =
       "&lmt=[LIMITADTRACKING]" +
       "&app_id=[APPBUNDLE]" +
       "&cb=[CACHEBUSTING]"
-    : "&ifa=[[[RIDA]]]" +
+    : // Roku's identifier is always a RIDA, so the namespace is a constant here
+      // rather than a macro (RAF has no ifa_type token). Without it the column
+      // is empty and platform mix is unmeasurable. Verified against production:
+      // the signature does not cover ifa_type, so adding it does not
+      // invalidate a tag.
+      "&ifa=[[[RIDA]]]" +
+      "&ifa_type=rida" +
       "&lmt=[[[LMT]]]" +
       "&app_id=[[[APPID]]]" +
       "&cb=[[[CACHEBUSTER]]]";
