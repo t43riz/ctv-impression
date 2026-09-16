@@ -72,7 +72,8 @@ Scheduled-job failures are gated on an **absolute count**, not a ratio: they
 fire at most once per cron run, so against a day of healthy beacon traffic any
 ratio rounds to ~0 and clears every ceiling. A single `alert_export_failed`,
 `alert_health_check_failed`, `alert_health_write_failed`,
-`alert_claim_release_failed` or `alert_admin_error` turns the check red.
+`alert_claim_release_failed`, `alert_admin_error` or `alert_notify_failed` turns
+the check red.
 
 Set `ALERT_WEBHOOK_URL` (a secret — for most incident tools the URL *is* the
 credential) to have a red nightly health check POSTed somewhere a human reads.

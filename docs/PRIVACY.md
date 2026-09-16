@@ -27,7 +27,9 @@ removed.
   campaign is child-directed, **or** the identifier arrives as an unexpanded
   ad-server macro (`[[[RIDA]]]`), we discard the identifier entirely and mark the
   impression `ifa_present=0`. Such impressions count toward totals but are
-  excluded from device-level reach.
+  excluded from device-level reach. Only the first two are an *opt-out signal*
+  sent to the platform: an unexpanded macro is a delivery failure, not a user's
+  choice, so it is never reported as one (§2.1).
 - **Frequency capping without an identifier:** non-attributable impressions
   (the LMT/COPPA/macro cases above) are deduplicated by a coarse key derived
   from `SHA-256(salt | "ip:" + device-IP + ":" + hour-bucket)`. It stores no
@@ -53,6 +55,14 @@ any resulting conversion is sent with Roku's `opt_out="true"` (LDU) flag, and
 the matched impression's IP is withheld from the payload along with the RIDA.
 The caller's phone number is **hashed** (never stored raw) and used only to
 satisfy Roku's identifier requirement on zero-match conversions.
+
+Only a real opt-out signal — `lmt=1`, or a campaign flagged child-directed — is
+reported to the platform as an opt-out. An impression whose identifier was
+unusable for any other reason (an unexpanded macro, a zeroed IFA, an unusable
+hash salt) also stores no identifier, but its conversion is sent with
+`opt_out="false"`: no user made that choice, and asserting one would misstate it.
+`Impression.lmt` (`src/types.ts`) carries that signal; `ifaPresent` governs
+identifier storage only, and the two are deliberately independent.
 
 This is the only component holding raw identifiers at rest, and it is
 short-lived by design (storage minimization for the matching purpose).
@@ -105,9 +115,16 @@ data to begin with.
 ## 5. Children's content (COPPA)
 
 For child-directed Roku channels, behavioral identifiers must not be used.
-Operationally: campaigns flagged child-directed should be configured to send
-`lmt=1` (or omit the IFA), which the Worker already treats as opt-out, so no
-identifier is processed for those impressions.
+Operationally, do both of these: flag the campaign child-directed in the
+`CAMPAIGNS` namespace (`campaign:<id>` = `child_directed`), and configure the tag
+to send `lmt=1`. Either one makes the Worker treat every impression on that
+campaign as an opt-out, so no identifier is processed.
+
+Omitting the IFA is **not** an opt-out signal. An absent `lmt` is read as consent
+(the tags are built to send it), and an absent identifier is equally an
+unexpanded ad-server macro — so such an impression is reported to the platform
+with `opt_out="false"`. Rely on the campaign flag or `lmt=1`, never on the
+identifier's absence.
 
 ## 6. Lawful basis / DPIA
 

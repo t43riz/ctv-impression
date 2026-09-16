@@ -159,7 +159,8 @@ audit; the suite is now 258 tests — see the status update above*):
   health red for a whole day, which is how an alert gets muted. Alerts with no
   `received` rows at all are reported as a full-rate failure, not as 0%.
 - Scheduled-job alerts (`alert_export_failed`, `alert_health_check_failed`,
-  `alert_health_write_failed`) are gated on an **absolute count** instead. They
+  `alert_health_write_failed`, `alert_claim_release_failed`, `alert_admin_error`,
+  `alert_notify_failed`) are gated on an **absolute count** instead. They
   fire at most once per cron run, so against a day of traffic their ratio rounds
   to zero and clears any sane ceiling — while the export is the only permanent
   record and the health artifact is what external monitors read.

@@ -559,6 +559,14 @@ describe("worker routing", () => {
     expect(second.status).toBe(429);
     expect(first.status).not.toBe(429);
     expect(outcomes(h.recon)).toContain("call_rate_limited");
+
+    // The retry contract travels in the response, not only in the docs: the
+    // limiter is a fixed one-minute window, so the remainder of the current
+    // minute is the correct wait and a retry aimed at it succeeds.
+    const retryAfter = Number(second.headers.get("Retry-After"));
+    expect(Number.isInteger(retryAfter)).toBe(true);
+    expect(retryAfter).toBeGreaterThanOrEqual(1);
+    expect(retryAfter).toBeLessThanOrEqual(60);
   });
 });
 

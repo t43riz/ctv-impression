@@ -137,6 +137,13 @@ const INFRA_ALERTS = [
   "alert_claim_release_failed",
   // The admin surface threw. Rare by nature, and a DSAR erasure runs there.
   "alert_admin_error",
+  // The alert webhook refused the notification. Reachable only when the check
+  // was already red, so this is the delivery of a real failure failing. It fires
+  // at most once per run, exactly like the rows above: left on the ratio gate it
+  // is invisible (one failure against a day of beacon traffic rounds to zero),
+  // and the next run that comes back green pushes nothing, so nothing ever tells
+  // a human that the alerting path itself is down.
+  "alert_notify_failed",
 ] as const;
 
 /**

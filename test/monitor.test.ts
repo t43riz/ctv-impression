@@ -49,6 +49,18 @@ describe("computeReconHealth", () => {
     expect(h.healthy).toBe(false);
   });
 
+  it("fails when the alert webhook itself refused the notification", () => {
+    // The webhook is the only push out of the system. This row is recorded when
+    // it fails, at most once per run — so on the ratio gate it was invisible
+    // against a day of beacon volume, which is the failure mode pinned here.
+    const h = computeReconHealth(
+      rows(["received", 1_000_000], ["counted", 1_000_000], ["alert_notify_failed", 1]),
+    );
+    expect(h.infraAlerts).toBe(1);
+    expect(h.alertRatio).toBeLessThan(0.01); // would have passed the ratio gate
+    expect(h.healthy).toBe(false);
+  });
+
   it("does not treat per-beacon alerts as scheduled-job failures", () => {
     // alert_raw_write_error is best-effort and proportional to traffic, so it
     // stays on the ratio gate rather than failing the first occurrence.

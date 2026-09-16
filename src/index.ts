@@ -238,9 +238,18 @@ export default {
       const callBudget = configInt(env.CALL_RATE_LIMIT_PER_MINUTE, 60, 0);
       if (!(await allowRequest(env.RATE, `call:${callIp}`, callBudget))) {
         recordRecon(env, "call_rate_limited", "unknown");
+        // The limiter is a fixed one-minute window, so the exact wait is the
+        // remainder of the current minute. Sent for the same reason 502/503
+        // carry it: a PBX that has not read the docs should still learn when to
+        // retry, and a retry aimed at the window boundary succeeds instead of
+        // hitting a counter that has not reset yet.
+        const retryAfter = 60 - (Math.floor(Date.now() / 1000) % 60);
         return new Response(JSON.stringify({ status: "rate_limited" }), {
           status: 429,
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Retry-After": String(retryAfter),
+          },
         });
       }
       return handleCall(request, env);

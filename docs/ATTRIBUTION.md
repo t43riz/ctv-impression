@@ -237,9 +237,12 @@ placeholder `event_group_id`) | `not_qualified` | `duplicate` | `unauthorized` |
 | `capi_error` | 502 | The conversion API rejected the send. The idempotency claim is released first, so a retry runs the send again. |
 | `internal_error` | 503 | A dependency (KV, Durable Object, matching store) failed. Any claim taken is released before responding. |
 
-`502` and `503` both carry **`Retry-After: 30`**. The distinction is deliberate:
-`502` means a genuine upstream answered badly, `503` means the fault may be
-ours. A PBX that treats any of the three as final silently drops billable
+All three carry **`Retry-After`**: `30` on `502` and `503`, and the remainder of
+the current minute (1–60) on `429`, since the limiter is a fixed one-minute
+window — a retry aimed at that boundary lands in a fresh window instead of
+hammering a counter that has not reset. The `502`/`503` distinction is
+deliberate: `502` means a genuine upstream answered badly, `503` means the fault
+may be ours. A PBX that treats any of the three as final silently drops billable
 conversions. Any retry of `fired` or `duplicate` is idempotent by `callId`.
 
 `skipped` means **nothing was sent**, and the claim is released so the PBX's
