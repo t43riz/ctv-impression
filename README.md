@@ -369,8 +369,12 @@ actually enforces it, and covers real SQLite `LIKE`/`ESCAPE` for the DSAR erase.
   Every response from the route carries `scope_complete` — the success, the
   validation rejections, the erase failures and a boundary `500` — so a client
   testing `scope_complete === false` rather than a falsy check cannot read a
-  failed erasure as a completed one. The unauthenticated `404` is the sole
-  exception, since it must not confirm the route exists.
+  failed erasure as a completed one. The route's `404`s are the exception
+  (unauthenticated, or a non-`POST` method): they stay plain text, since a JSON
+  body would confirm the route exists to an unauthenticated prober.
+  `scope_complete` covers **campaign scope only** — a response can pair it with
+  `raw_tier.truncated: true`, so both must be clean before recording a request
+  as fulfilled.
 - **The alert webhook URL never reaches the logs.** For most incident tools the
   URL *is* the credential, and a transport failure puts the full request URL
   into the error that `postJson` returns as its body — so logging that body to
@@ -404,3 +408,16 @@ actually enforces it, and covers real SQLite `LIKE`/`ESCAPE` for the DSAR erase.
   health result to an endpoint of your choice. Left unset, the result is only
   written to `_status/health.json`, which nothing reads on a schedule — so the
   ledger signal stops at a file.
+- **Nothing detects the health check not running** (deployment prerequisite, not
+  code). Every signal in the system is push-on-failure: `notifyIfUnhealthy` is
+  called only from `runHealthCheck`, which runs only on the `30 3 * * *` trigger.
+  So a healthy night and a cron that never fired are byte-identical to every
+  automated consumer — a removed trigger, a suspended account or a broken
+  `scheduled` handler is silent. **Before go-live, point an external monitor at
+  `_status/health.json` and alert when its `ts` is older than ~26h.** That check
+  cannot live inside this Worker, because a Worker whose scheduler is dead
+  cannot report its own absence.
+- **`infraAlerts` is a single integer** covering six unrelated failures (export,
+  health check, artifact write, stranded call claim, DSAR erase, alert delivery).
+  A red health result says something scheduled broke, not which — so the page it
+  produces needs a follow-up Analytics query before anyone can act on it.

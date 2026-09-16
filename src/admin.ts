@@ -286,7 +286,16 @@ async function handleAdminInner(request: Request, env: Env): Promise<Response> {
     const requested = (body.campaigns ?? []).filter(
       (c) => typeof c === "string" && ID_RE.test(c),
     );
-    const enumerated = await listCampaigns(env);
+    // Only enumerate when the caller did not narrow the scope. PRIVACY §4 tells
+    // an operator whose allowlist exceeds the cap to re-run with explicit
+    // `campaigns` batches — enumerating anyway made that recovery path fail in
+    // the one situation it exists for, since a KV listing outage threw before
+    // the supplied list was ever used. It also spent up to 20 subrequests on a
+    // result the next line discards.
+    const enumerated =
+      requested.length > 0
+        ? { ids: [] as string[], complete: false }
+        : await listCampaigns(env);
     const campaigns = requested.length > 0 ? requested : enumerated.ids;
     // The enumerated path cannot exceed the cap (the page walk is bounded to
     // exactly it), so this only ever trims a pathological listing. Applied

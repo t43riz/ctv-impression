@@ -173,11 +173,20 @@ caller-supplied list.
 4. `RecentImpressions` self-purges within the attribution window; AE rows
    expire in 3 months (hash only); aggregates hold no identifiers.
 
-**Scope reporting.** Read `scope_complete`, not the status code. A successful
-erasure is always `200`; `scope_complete: false` means the scan did not provably
-cover every shard — either `campaigns` was supplied by the caller and cannot be
-verified exhaustive, or the allowlist listing was truncated. **Never record a
-`scope_complete: false` response as a fulfilled request.**
+**Scope reporting.** Read `scope_complete` **and** `raw_tier.truncated`, not the
+status code. A successful erasure is always `200`; `scope_complete: false` means
+the scan did not provably cover every shard — either `campaigns` was supplied by
+the caller and cannot be verified exhaustive, or the allowlist listing was
+truncated. **Never record a `scope_complete: false` response as a fulfilled
+request.**
+
+`scope_complete` describes **campaign scope only**: whether every shard the
+subject could appear in was visited. It is not a statement about the raw tier,
+which is scanned afterwards and reports its own completeness. A response can
+carry `scope_complete: true` alongside `raw_tier.truncated: true` — every
+campaign was covered, and the raw scan still hit its safety cap with objects
+possibly left behind. **Treat that as an incomplete erasure and re-run**; both
+fields must be clean before recording a request as fulfilled.
 
 (Earlier builds returned `206` for this. That status is defined for range
 responses and is expected to carry `Content-Range`, so proxies and generated
@@ -202,8 +211,10 @@ complete.
 failures, the `400` validation rejections, and a `500` raised by the boundary —
 so a client testing `scope_complete === false` reaches the same conclusion as
 one testing for falsiness on any of them. `true` is returned only by a
-fully-enumerated erasure. The single exception is the unauthenticated `404`,
-which must not confirm that the route exists.
+fully-enumerated erasure. The exception is the route's `404`s — both the
+unauthenticated one and the one for a non-`POST` method — which are plain text
+rather than JSON and must stay that way: a JSON body there would confirm the
+route exists to an unauthenticated prober.
 
 `RAW_RETENTION_DAYS` must be at least the raw bucket's lifecycle rule, otherwise
 objects written outside the scanned window would be missed.

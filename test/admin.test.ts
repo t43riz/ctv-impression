@@ -447,6 +447,37 @@ describe("admin DSAR", () => {
     }
   });
 
+  it("completes a caller-narrowed erasure when enumeration is unavailable", async () => {
+    // PRIVACY §4 tells an operator whose allowlist exceeds the cap to re-run
+    // with explicit `campaigns` batches. Enumerating unconditionally made that
+    // recovery path throw in the one failure mode it exists for: the supplied
+    // list was sufficient, but the KV listing ran first and took the request
+    // down with it.
+    const { env, dedupState } = makeEnv({
+      CAMPAIGNS: {
+        list: async () => {
+          throw new Error("kv list unavailable");
+        },
+        get: async () => null,
+      } as unknown as KVNamespace,
+    });
+    // A row for the subject, so a successful erase is observable rather than
+    // vacuously "nothing to delete".
+    const { hashIfa } = await import("../src/lib/crypto");
+    const hash = await hashIfa(env.IFA_HASH_SALT as string, "dev-1");
+    dedupState.sql.seen.set(`${hash}|camp|cre`, Math.floor(Date.now() / 1000) + 1000);
+
+    const res = await handleAdmin(dsar({ ifa: "dev-1", campaigns: ["camp"] }), env);
+    const body = (await res.json()) as { scope_complete: boolean; campaigns_scanned: number };
+
+    expect(res.status).toBe(200);
+    expect(body.campaigns_scanned).toBe(1);
+    // Still not provably exhaustive — the caller narrowed it — but the erasure
+    // ran, which is the difference between a partial record and no record.
+    expect(body.scope_complete).toBe(false);
+    expect(dedupState.sql.seen.size).toBe(0);
+  });
+
   it("erases across every allowlisted campaign when none are supplied", async () => {
     // The dedup store is sharded by campaign, so an erasure that visits only a
     // caller-supplied subset silently leaves rows behind. Omitting `campaigns`
