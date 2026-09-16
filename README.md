@@ -206,10 +206,10 @@ POST /admin/dsar  {"ifa":"..."}                          DSAR erasure
 
 `/admin/dsar` enumerates the `CAMPAIGNS` allowlist so the erasure covers every
 shard the subject could appear in. Supplying `{"campaigns":[...]}` narrows the
-scan and is answered **206** with `scope_complete: false`, because a
-caller-supplied list cannot be verified exhaustive — only the full enumeration
-returns a clean 200. A raw-tier object whose ownership cannot be verified still
-fails closed with a 500.
+scan and is answered **200** with `scope_complete: false`, because a
+caller-supplied list cannot be verified exhaustive — only a full enumeration
+that completes returns a clean 200. A raw-tier object whose ownership cannot be
+verified still fails closed with a 500.
 
 A second cron (03:30 UTC) writes `_status/health.json` to the archive bucket
 for external monitors. A health check that cannot complete writes
@@ -366,9 +366,11 @@ actually enforces it, and covers real SQLite `LIKE`/`ESCAPE` for the DSAR erase.
   defined for range responses and is expected to carry `Content-Range`, so
   proxies and generated clients may treat it as a truncated body. The campaign
   bound (200) now applies to the enumerated path too, which is the default.
-  Every DSAR response carries `scope_complete`, including the two failure paths:
-  a client testing `scope_complete === false` rather than a falsy check would
-  otherwise read a hard erase failure as a completed erasure.
+  Every response from the route carries `scope_complete` — the success, the
+  validation rejections, the erase failures and a boundary `500` — so a client
+  testing `scope_complete === false` rather than a falsy check cannot read a
+  failed erasure as a completed one. The unauthenticated `404` is the sole
+  exception, since it must not confirm the route exists.
 - **The alert webhook URL never reaches the logs.** For most incident tools the
   URL *is* the credential, and a transport failure puts the full request URL
   into the error that `postJson` returns as its body — so logging that body to

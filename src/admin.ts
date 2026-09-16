@@ -39,6 +39,22 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
+/**
+ * A DSAR failure response, always carrying `scope_complete: false`.
+ *
+ * PRIVACY §4 states the field is on *every* response from the route, because a
+ * client that tests `scope_complete === false` rather than falsiness must reach
+ * the same conclusion as one that reads the status code. Only the fully
+ * enumerated success path returns `true`, so every other exit — a validation
+ * rejection, an empty enumeration, an erase that stopped part-way, or a throw
+ * caught by the admin boundary — goes through here. Enforced by a table test
+ * over the whole failure surface, since a new `return json(...)` added to this
+ * route would silently reintroduce the gap.
+ */
+function dsarError(body: Record<string, unknown>, status: number): Response {
+  return json({ ...body, scope_complete: false }, status);
+}
+
 /** Constant-time comparison; both sides hashed to fixed length first. */
 async function tokenOk(env: Env, header: string | null): Promise<boolean> {
   // A deploy still carrying the documented `.dev.vars.example` token has no
@@ -154,7 +170,11 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
       path === "/admin/dsar" ? "alert_admin_dsar_error" : "alert_admin_error",
       "unknown",
     );
-    return json({ error: "internal_error" }, 500);
+    // A DSAR throw is still a DSAR response. The erasure's progress is unknown,
+    // which is "not provably complete" rather than the absence of an answer.
+    return path === "/admin/dsar"
+      ? dsarError({ error: "internal_error" }, 500)
+      : json({ error: "internal_error" }, 500);
   }
 }
 
@@ -232,22 +252,22 @@ async function handleAdminInner(request: Request, env: Env): Promise<Response> {
       // read would then throw: a malformed body must not become an unhandled 500
       // on the one route that performs an irreversible erasure.
       if (parsed === null || typeof parsed !== "object") {
-        return json({ error: "bad json" }, 400);
+        return dsarError({ error: "bad json" }, 400);
       }
       body = parsed as typeof body;
     } catch {
-      return json({ error: "bad json" }, 400);
+      return dsarError({ error: "bad json" }, 400);
     }
     const ifa = (body.ifa ?? "").trim();
     if (!ifa) {
-      return json({ error: "ifa required" }, 400);
+      return dsarError({ error: "ifa required" }, 400);
     }
     // A string here would reach `.filter` and throw, again as a 500.
     if (body.campaigns !== undefined && !Array.isArray(body.campaigns)) {
-      return json({ error: "campaigns must be an array of campaign ids" }, 400);
+      return dsarError({ error: "campaigns must be an array of campaign ids" }, 400);
     }
     if ((body.campaigns ?? []).length > MAX_DSAR_CAMPAIGNS) {
-      return json(
+      return dsarError(
         {
           error: "too_many_campaigns",
           note:
@@ -275,7 +295,10 @@ async function handleAdminInner(request: Request, env: Env): Promise<Response> {
     const capped = campaigns.slice(0, MAX_DSAR_CAMPAIGNS);
 
     if (capped.length === 0) {
-      return json(
+      // A hard failure that erased nothing, so it reports partiality like every
+      // other exit from the route: absent a field, a caller testing
+      // `scope_complete === false` would read this as a completed erasure.
+      return dsarError(
         {
           error: "no_campaigns",
           note:
@@ -310,18 +333,13 @@ async function handleAdminInner(request: Request, env: Env): Promise<Response> {
       // Same rule as the raw tier below: an erase that did not finish is not a
       // success, and the caller needs to know how far it got so a re-run is
       // informed rather than blind.
-      return json(
+      return dsarError(
         {
           error: "dedup_erase_failed",
           detail: err instanceof Error ? err.message : String(err),
           dedup_deleted: dedupDeleted,
           campaigns_scanned: dedupCampaigns,
           campaigns_planned: capped.length,
-          // Partiality is carried by this field on every response, including
-          // the failures. A caller testing `scope_complete === false` rather
-          // than a falsy check would otherwise read a hard erase failure as a
-          // complete erasure and record an Article 17 request as fulfilled.
-          scope_complete: false,
           note:
             "Dedup erasure stopped part-way. THIS REQUEST IS NOT COMPLETE — do not " +
             "record it as fulfilled; re-run once the Durable Object responds.",
@@ -344,17 +362,15 @@ async function handleAdminInner(request: Request, env: Env): Promise<Response> {
       // eraseRawByHash fails closed when it cannot verify whether an object
       // belongs to the subject. Reporting a partial erasure as a success would
       // be a compliance failure, so surface it as an explicit 500.
-      return json(
+      return dsarError(
         {
           error: "raw_erase_failed",
           detail: err instanceof Error ? err.message : String(err),
           dedup_deleted: dedupDeleted,
-          // Same contract as the dedup failure above. `raw_tier` and
-          // `campaigns_scanned` are reported too so a re-run can be scoped to
-          // what is left rather than starting blind.
+          // `raw_tier`/`campaigns_scanned` are reported so a re-run can be
+          // scoped to what is left rather than starting blind.
           raw_tier: raw,
           campaigns_scanned: capped.length,
-          scope_complete: false,
           note:
             "Dedup keys for the supplied campaigns were erased, but the raw R2 tier " +
             "could not be verified. THIS REQUEST IS NOT COMPLETE — do not record it " +

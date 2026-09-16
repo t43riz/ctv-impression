@@ -406,6 +406,47 @@ describe("admin DSAR", () => {
     expect((await handleAdmin(dsar({}), env)).status).toBe(400);
   });
 
+  it("carries scope_complete on every failure exit, not only the erase failures", async () => {
+    // PRIVACY §4 promises the field on *every* response from the route, because
+    // a client testing `scope_complete === false` rather than falsiness must
+    // reach the same conclusion as one reading the status code. Only a
+    // full-enumeration success returns `true`, so an early return added without
+    // the field would silently reintroduce the gap — which is exactly how the
+    // empty-enumeration path and the boundary got missed.
+    const noCampaigns = makeEnv({
+      CAMPAIGNS: {
+        list: async () => ({ keys: [], list_complete: true, cursor: "" }),
+        get: async () => null,
+      } as unknown as KVNamespace,
+    });
+    const listThrows = makeEnv({
+      CAMPAIGNS: {
+        list: async () => {
+          throw new Error("kv list unavailable");
+        },
+        get: async () => null,
+      } as unknown as KVNamespace,
+    });
+    const tooMany = Array.from({ length: 201 }, (_, i) => `c${i}`);
+
+    const cases: [string, Env, Request, number][] = [
+      ["unparseable body", makeEnv().env, authed("/admin/dsar", { method: "POST", body: "{oops" }), 400],
+      ["null body", makeEnv().env, dsar(null), 400],
+      ["no identifier", makeEnv().env, dsar({}), 400],
+      ["campaigns not an array", makeEnv().env, dsar({ ifa: "dev-1", campaigns: "dev-1" }), 400],
+      ["too many campaigns", makeEnv().env, dsar({ ifa: "dev-1", campaigns: tooMany }), 400],
+      ["nothing enumerable", noCampaigns.env, dsar({ ifa: "dev-1" }), 500],
+      ["enumeration throws", listThrows.env, dsar({ ifa: "dev-1" }), 500],
+    ];
+
+    for (const [name, env, request, status] of cases) {
+      const res = await handleAdmin(request, env);
+      const body = (await res.json()) as { scope_complete?: unknown };
+      expect(res.status, name).toBe(status);
+      expect(body.scope_complete, name).toBe(false);
+    }
+  });
+
   it("erases across every allowlisted campaign when none are supplied", async () => {
     // The dedup store is sharded by campaign, so an erasure that visits only a
     // caller-supplied subset silently leaves rows behind. Omitting `campaigns`

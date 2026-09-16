@@ -196,9 +196,14 @@ is `500 {"error":"dedup_erase_failed"}` with `dedup_deleted`,
 `campaigns_scanned` and `campaigns_planned` so a re-run is informed. The raw
 tier fails the same way with `raw_erase_failed`, reporting `raw_tier` and
 `campaigns_scanned` for the same reason. Both mean the request is **not**
-complete, and both carry `scope_complete: false` explicitly — the field is
-present on *every* DSAR response, so a client testing `scope_complete === false`
-reaches the same conclusion as one testing for falsiness.
+complete.
+
+**`scope_complete` is on every response from the route** — the `200`s, the erase
+failures, the `400` validation rejections, and a `500` raised by the boundary —
+so a client testing `scope_complete === false` reaches the same conclusion as
+one testing for falsiness on any of them. `true` is returned only by a
+fully-enumerated erasure. The single exception is the unauthenticated `404`,
+which must not confirm that the route exists.
 
 `RAW_RETENTION_DAYS` must be at least the raw bucket's lifecycle rule, otherwise
 objects written outside the scanned window would be missed.
