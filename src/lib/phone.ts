@@ -1,26 +1,48 @@
 import { AREA_CODE_STATE } from "./areacodes";
 
-/**
- * Phone normalization + hashing per Roku CAPI rules:
- *   - remove all special chars including "+" and "-"
- *   - remove leading zeros
- *   - trim whitespace
- *   - SHA-256, lowercase hex (NOT base64)
- *
- * For US numbers the normalized form includes the country code "1"
- * (e.g. "+1 (415) 555-0142" -> "14155550142").
- */
 const encoder = new TextEncoder();
 
+/**
+ * Digits-only form of a phone number: strips every non-digit and any leading
+ * zeros (an international trunk prefix, e.g. "0044 20..." -> "44 20...").
+ *
+ * This is the internal/geo form. It is NOT what Roku hashes — see
+ * `toE164` — so use `hashPhone` for anything sent to a conversion API.
+ */
 export function normalizePhone(raw: string): string {
   let digits = (raw ?? "").replace(/[^0-9]/g, "");
   digits = digits.replace(/^0+/, "");
   return digits;
 }
 
+/** NANP subscriber numbers are 10 digits; with the country code, 11. */
+const NANP_LOCAL_DIGITS = 10;
+
+/**
+ * E.164 form for hashing, per Roku's CAPI spec: country code preceded by "+",
+ * no formatting characters, leading zeros of the local number removed, and the
+ * "+" retained.
+ *
+ * Keeping the "+" matters: it is part of the hashed string, so dropping it
+ * yields a well-formed 64-char digest that matches nothing on Roku's side. The
+ * failure is silent — the API still answers 200 and reports the event as
+ * processed — so it surfaces as unexplained zero attribution rather than an
+ * error.
+ *
+ * A bare 10-digit number is assumed to be NANP (+1). The tracking numbers this
+ * system serves are US/CA, and hashing a number with no country code would
+ * produce a third, equally unmatchable digest; assuming the only country code
+ * that can apply is strictly better than that.
+ */
+export function toE164(raw: string): string {
+  const digits = normalizePhone(raw);
+  if (digits === "") return "";
+  return digits.length === NANP_LOCAL_DIGITS ? `+1${digits}` : `+${digits}`;
+}
+
+/** SHA-256 of the E.164 number, lowercase hex (never base64), per Roku's spec. */
 export async function hashPhone(raw: string): Promise<string> {
-  const normalized = normalizePhone(raw);
-  const buf = await crypto.subtle.digest("SHA-256", encoder.encode(normalized));
+  const buf = await crypto.subtle.digest("SHA-256", encoder.encode(toE164(raw)));
   const bytes = new Uint8Array(buf);
   let out = "";
   for (const b of bytes) out += b.toString(16).padStart(2, "0");

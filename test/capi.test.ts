@@ -35,7 +35,10 @@ function probabilisticMatch(over: Partial<ImpressionRecord> = {}): MatchResult {
       hhId: "",
       region: "California",
       city: "SF",
-      postal: "94103",
+      // Always "" in production: the beacon deliberately does not read
+      // `cf.postalCode` (Roku DPP §5 treats precise geo as Sensitive Data).
+      // The fixture matches that rather than implying a postal we never hold.
+      postal: "",
       lmt: false,
       ...over,
     },
@@ -54,6 +57,11 @@ describe("buildCapiPayload", () => {
     expect(ev.user_data.aRI).toBe("rida-abc");
     expect(ev.user_data.ph).toMatch(/^[0-9a-f]{64}$/);
     expect(ev.user_data.st).toBe("California");
+    // City is collected at the beacon and already stored, so withholding it
+    // would discard match quality for nothing.
+    expect(ev.user_data.ct).toBe("SF");
+    // Never sent: the beacon does not collect a postal code at all.
+    expect(ev.user_data.zp).toBeUndefined();
     expect(ev.opt_out).toBe("false");
     expect(ev.event_id).toBe("call_call-1_cre_hero");
     expect((ev.custom_data as Record<string, unknown>).match_type).toBe("probabilistic_ip");

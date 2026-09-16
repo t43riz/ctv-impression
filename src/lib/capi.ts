@@ -24,7 +24,13 @@ import { postJson, configInt } from "./http";
  *   - ph                 (hashed caller phone, always)     [certain]
  *   - client_ip_address  (best-guess impression IP)        [probabilistic]
  *   - aRI                (best-guess impression RIDA)      [probabilistic, non-LMT]
- *   - st / zp            (state / postal, from the impression when matched)
+ *   - st / ct            (state / city, from the impression when matched)
+ *
+ * Roku accepts considerably more than this (em, external_id, fn/ln, db, ge,
+ * client_user_agent). Every one of those is advertiser-supplied CRM data that
+ * this system never sees; adding them requires the advertiser to send the
+ * fields on the /call webhook, and `client_user_agent` would additionally need
+ * a DSA §14(i) cover-page amendment. See docs/ATTRIBUTION.md.
  */
 
 const LIVE_URL = "https://events.ads.rokuapi.net/v1/events";
@@ -36,6 +42,12 @@ export interface CapiUserData {
   aRI?: string;
   ph?: string;
   st?: string;
+  ct?: string;
+  // Always absent in practice: the beacon deliberately does not read
+  // `cf.postalCode` (Roku's Ad Partner Data Processing Policy §5 classes
+  // precise geo-location as Sensitive Data), so the stored record's `postal`
+  // is always "". Kept because Roku accepts the field and the matching store
+  // could carry it if the cover page is ever amended.
   zp?: string;
 }
 
@@ -123,6 +135,9 @@ export async function buildCapiPayload(
       user.aRI = match.best.rida; // omitted under LMT (rida === "")
     }
     if (match.best.region) user.st = match.best.region;
+    // City is already collected and stored with the impression; sending it
+    // narrows the identity graph beyond state alone at no extra collection.
+    if (match.best.city) user.ct = match.best.city;
     if (match.best.postal) user.zp = match.best.postal;
     // Fall back to the area-code state when the record carried no geo, so a
     // non-attributable match is not strictly worse than the phone-only path.

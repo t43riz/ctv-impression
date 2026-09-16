@@ -98,8 +98,22 @@ Per the [Conversions API spec](https://help.ads.roku.com/en/articles/8880744-con
 |-------|-----------|
 | `client_ip_address` | best-guess impression IP (probabilistic, withheld under LMT) |
 | `aRI` (RIDA) | best-guess impression RIDA (probabilistic, withheld under LMT) |
-| `ph` (sha256 of normalized phone) | **always** — the only certain identifier; satisfies Roku's requirement on zero-match |
-| `st` / `zp` | from best-guess impression geo, else caller area-code state |
+| `ph` (sha256 of the **E.164** phone) | **always** — the only certain identifier; satisfies Roku's requirement on zero-match |
+| `st` | best-guess impression region, else caller area-code state |
+| `ct` | best-guess impression city (already collected at the beacon) |
+
+> `ph` hashes the E.164 form **including the leading `+`** (`+14155550142`),
+> per Roku's normalization rules. This is load-bearing: the `+` is part of the
+> hashed string, so omitting it yields a well-formed 64-char digest that
+> matches nothing, and the API still answers `200` with the event reported as
+> processed. A bare 10-digit number from the PBX is assumed to be NANP (`+1`).
+> `test/phone.test.ts` pins the digest against a known vector so the rule
+> cannot silently regress.
+
+> `zp` is never sent. The beacon deliberately does not read `cf.postalCode` —
+> Roku's Ad Partner Data Processing Policy §5 classes precise geo-location as
+> Sensitive Data — so the stored record's `postal` is always empty. The field
+> remains in the client only for a future cover-page amendment.
 
 - **`opt_out: "true"`** (Roku LDU) when the best-guess impression was LMT. Under
   LMT both device identifiers (`client_ip_address`, `aRI`) are withheld; the IP
@@ -128,7 +142,7 @@ Per the [Conversions API spec](https://help.ads.roku.com/en/articles/8880744-con
       "client_ip_address": "203.0.113.7",
       "aRI": "a1b2c3d4-...",
       "st": "California",
-      "zp": "94103"
+      "ct": "San Francisco"
     },
     "custom_data": {
       "content_ids": ["cre_hero"],
@@ -142,6 +156,45 @@ Per the [Conversions API spec](https://help.ads.roku.com/en/articles/8880744-con
   }]
 }
 ```
+
+---
+
+## 5.1 Enrichment the advertiser can supply
+
+Roku's `user_data` accepts materially more than we send. None of it is
+obtainable from the impression or the phone call: it lives in the advertiser's
+CRM, so every field below requires them to add it to the `/call` webhook body.
+Ranked by attribution lift per unit of effort:
+
+| Field | Source | Why it matters |
+|-------|--------|----------------|
+| `em` | lead record | Hashed email. The strongest deterministic key after phone, and the largest single lift available. Normalize (lowercase, trim, strip `+tag`) **then** SHA-256. |
+| `external_id` | CRM lead/customer ID | Lets Roku join across sessions and build event-based custom audiences. |
+| `fn` / `ln` | lead record | Hashed name. Raises identity-graph match rate alongside `zp`/`ct`. |
+| `db` / `ge` | lead record | Hashed DOB (`yyyy-mm-dd`) and gender. Useful in insurance verticals where both are captured anyway. |
+| `zp` | lead record | Advertiser-supplied billing/service postal is **their** first-party data, so it does not collide with the DPP §5 restriction on deriving precise geo from the device. |
+| `client_user_agent` | — | Accepted by Roku, but **not** on our licensed Campaign Data list. Requires a DSA §14(i) cover-page amendment before collection. |
+
+And on `custom_data`, which drives outcome reporting rather than matching:
+
+| Field | Why it matters |
+|-------|----------------|
+| `value` + `currency` | Already supported (`saleValue`/`currency` on the webhook). Required for Roku's ROAS reporting. |
+| `order_id` | Policy/order number. Makes a conversion reconcilable against the advertiser's own books. |
+| `status` | Distinguishes sold / qualified / no-sale instead of collapsing them into one conversion. |
+| `purchase_type` | `first_time_purchase` vs `repeat_purchase`. |
+| `predicted_ltv` | Matters wherever first-payment value understates the contract, which is the norm for subscriptions and insurance. |
+
+Two further notes on how events are shaped:
+
+- **Event naming.** `event_name` defaults to `LEAD` and is configurable per
+  deploy. Roku defines `CONTACT` as contact initiated by telephone, which fits
+  an inbound call more literally. The richer pattern is two events sharing an
+  `event_id`: `CONTACT` when the call qualifies, then `PURCHASE`/`SUBSCRIBE`
+  when the policy issues.
+- **`partner_name`.** Roku provides this for a third party sending events on an
+  advertiser's behalf, which is exactly this system's position. Not currently
+  set.
 
 ---
 
