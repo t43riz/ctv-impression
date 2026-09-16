@@ -365,14 +365,33 @@ async function notifyIfUnhealthy(env: Env, body: Record<string, unknown>): Promi
       { timeoutMs: configInt(env.HTTP_TIMEOUT_MS, 5000), attempts: 2 },
     );
     if (!res.ok) {
+      // Status only, deliberately. For most incident tools this URL *is* the
+      // credential, and on a transport failure `postJson` puts the caught
+      // error's message into `res.body` — workerd quotes the full request URL
+      // there. Logging the body to diagnose a delivery failure is the obvious
+      // next change and would publish a post-to-the-incident-channel secret
+      // into Workers Logs, which more people can read than can read secrets.
       console.log(`alert_notify_failed status=${res.status}`);
       recordRecon(env, "alert_notify_failed", "unknown");
     }
   } catch (err) {
+    // `postJson` converts transport failures into `ok: false`, so this is
+    // reachable only if it is changed to rethrow. Kept as a boundary because a
+    // throw here would escape into the cron, and redacted for the same reason
+    // the branch above logs no body.
     console.log(
-      "alert_notify_failed",
-      err instanceof Error ? err.message : String(err),
+      `alert_notify_failed host=${safeHost(url)}`,
+      err instanceof Error ? err.name : "error",
     );
     recordRecon(env, "alert_notify_failed", "unknown");
+  }
+}
+
+/** Host only, for logging a URL that is itself a credential. */
+function safeHost(raw: string): string {
+  try {
+    return new URL(raw).host;
+  } catch {
+    return "invalid-url";
   }
 }

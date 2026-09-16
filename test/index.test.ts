@@ -696,6 +696,71 @@ describe("scheduled jobs", () => {
 
     expect(outcomes(h.recon)).toContain("alert_notify_failed");
   });
+
+  it("never logs the webhook URL when delivery fails at the transport", async () => {
+    // The URL is the credential for most incident tools, and a transport
+    // failure is exactly where it leaks: workerd quotes the full request URL in
+    // the error, and `postJson` surfaces that message as `res.body`. Logging
+    // that body to diagnose delivery is a one-line change away, so pin it.
+    const logged: string[] = [];
+    const logSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation((...args: unknown[]) => void logged.push(args.map(String).join(" ")));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).startsWith("https://hooks.")) {
+          // Shaped like a real workerd transport failure, which quotes the URL.
+          throw new TypeError(`Fetch API cannot load: ${String(url)}`);
+        }
+        return new Response(JSON.stringify({ meta: [], data: [], rows: 0 }), { status: 200 });
+      }),
+    );
+    const h = makeHarness({ ALERT_WEBHOOK_URL: "https://hooks.example.com/s3cr3t-path" });
+
+    await run(h.env, "30 3 * * *");
+
+    expect(outcomes(h.recon)).toContain("alert_notify_failed");
+    const notifyLogs = logged.filter((l) => l.includes("alert_notify_failed"));
+    expect(notifyLogs.length).toBeGreaterThan(0);
+    expect(notifyLogs.join("\n")).not.toContain("s3cr3t-path");
+    logSpy.mockRestore();
+  });
+
+  it("does not attempt delivery when no webhook is configured", async () => {
+    // The feature's promise is that an unconfigured deployment behaves exactly
+    // as before. Without this, dropping the `!url` guard leaves the suite green
+    // while production POSTs to "" on every red run — which throws, records
+    // alert_notify_failed, and that outcome is gated, so every deployment that
+    // never opted in goes red.
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        calls.push(String(url));
+        return new Response(JSON.stringify({ meta: [], data: [], rows: 0 }), { status: 200 });
+      }),
+    );
+    // Configured enough to reach the Analytics SQL read (so there are real
+    // outbound calls to compare against), but with no ALERT_WEBHOOK_URL. The
+    // stale export marker makes the check red, which is the only state in which
+    // delivery is attempted at all.
+    const h = makeHarness({ ACCOUNT_ID: "acct-123", CF_API_TOKEN: "sql-read-token" });
+    await h.archive.put(
+      "_status/last_export.json",
+      JSON.stringify({ date: "2020-01-01", ts: "2020-01-01T00:00:00.000Z" }),
+    );
+
+    await run(h.env, "30 3 * * *");
+
+    // Asserting "no hooks.* call" would be vacuous: with the guard dropped the
+    // Worker posts to the empty string, which is not a hooks URL either. Assert
+    // instead that every outbound request had a real absolute URL, which the
+    // unset case violates the moment delivery is attempted at all.
+    expect(calls.length).toBeGreaterThan(0);
+    for (const u of calls) expect(u).toMatch(/^https:\/\/.+/);
+    expect(outcomes(h.recon)).not.toContain("alert_notify_failed");
+  });
 });
 
 afterEach(() => {

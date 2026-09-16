@@ -68,12 +68,20 @@ Health ceilings are configurable too, each as a fraction of traffic
 `HEALTH_MAX_CALL_ERROR_RATIO` `0.5`, `HEALTH_MAX_CALL_REJECT_RATIO` `0.5`); an
 unset, blank or out-of-range value falls back to the default.
 
-Scheduled-job failures are gated on an **absolute count**, not a ratio: they
-fire at most once per cron run, so against a day of healthy beacon traffic any
-ratio rounds to ~0 and clears every ceiling. A single `alert_export_failed`,
+Alerts whose occurrence is **bounded** are gated on an absolute count, not a
+ratio: they fire at most once per cron run (or, for a DSAR, once per erasure
+request), so against a day of healthy beacon traffic any ratio rounds to ~0 and
+clears every ceiling. A single `alert_export_failed`,
 `alert_health_check_failed`, `alert_health_write_failed`,
-`alert_claim_release_failed`, `alert_admin_error` or `alert_notify_failed` turns
-the check red.
+`alert_claim_release_failed`, `alert_admin_dsar_error` or `alert_notify_failed`
+turns the check red.
+
+`alert_admin_error` — a throw on the read-only report routes — is deliberately
+**not** in that set. Those routes are operator-invoked and unbounded, so any
+dashboard refresh during an upstream blip could raise one, and gating it
+absolutely would red-light health for 24h over a transient failure on a route
+that changes nothing. It stays on the ratio gate, where a genuinely broken admin
+surface still clears the ceiling.
 
 Set `ALERT_WEBHOOK_URL` (a secret — for most incident tools the URL *is* the
 credential) to have a red nightly health check POSTed somewhere a human reads.
@@ -344,7 +352,8 @@ actually enforces it, and covers real SQLite `LIKE`/`ESCAPE` for the DSAR erase.
   SQL API; without it a network failure escaped as a bare runtime 500 with no
   ledger row, and the upstream error detail (which can quote the account id)
   risked reaching the caller. It now answers a flat `internal_error` and records
-  `alert_admin_error`.
+  `alert_admin_dsar_error` for a failed erasure or `alert_admin_error` for a
+  report route, because only the former is bounded enough to gate absolutely.
 - **A failed `/call` claim release is recorded, not just logged.** A stranded
   claim makes the PBX's retry answer `duplicate`, and `call_duplicate` is
   deliberately never gated — so the lost conversion used to come to rest in the
@@ -357,6 +366,14 @@ actually enforces it, and covers real SQLite `LIKE`/`ESCAPE` for the DSAR erase.
   defined for range responses and is expected to carry `Content-Range`, so
   proxies and generated clients may treat it as a truncated body. The campaign
   bound (200) now applies to the enumerated path too, which is the default.
+  Every DSAR response carries `scope_complete`, including the two failure paths:
+  a client testing `scope_complete === false` rather than a falsy check would
+  otherwise read a hard erase failure as a completed erasure.
+- **The alert webhook URL never reaches the logs.** For most incident tools the
+  URL *is* the credential, and a transport failure puts the full request URL
+  into the error that `postJson` returns as its body — so logging that body to
+  diagnose a delivery failure would publish a post-to-the-incident-channel
+  secret to anyone who can read Workers Logs.
 
 ## Known follow-on work
 

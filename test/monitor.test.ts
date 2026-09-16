@@ -61,6 +61,37 @@ describe("computeReconHealth", () => {
     expect(h.healthy).toBe(false);
   });
 
+  it("fails on a DSAR erase failure but not on a report-route failure", () => {
+    // Both come from the same admin boundary, and the split is the point: a
+    // legally-obligated erasure that stopped part-way must be fatal, while the
+    // read-only report routes are operator-invoked and unbounded — any
+    // dashboard refresh during an upstream blip could raise one, and gating it
+    // absolutely would red-light health for a day over a transient failure.
+    const dsar = computeReconHealth(
+      rows(["received", 1_000_000], ["counted", 1_000_000], ["alert_admin_dsar_error", 1]),
+    );
+    expect(dsar.infraAlerts).toBe(1);
+    expect(dsar.alertRatio).toBeLessThan(0.01); // would have passed the ratio gate
+    expect(dsar.healthy).toBe(false);
+
+    const report = computeReconHealth(
+      rows(["received", 1_000_000], ["counted", 1_000_000], ["alert_admin_error", 1]),
+    );
+    expect(report.infraAlerts).toBe(0);
+    expect(report.healthy).toBe(true);
+  });
+
+  it("still fails when report-route errors are a real outage rather than a blip", () => {
+    // Leaving alert_admin_error on the ratio gate must not make it toothless:
+    // a genuinely broken admin surface clears the ceiling on its own.
+    const h = computeReconHealth(
+      rows(["received", 1000], ["counted", 1000], ["alert_admin_error", 50]),
+    );
+    expect(h.infraAlerts).toBe(0);
+    expect(h.alertRatio).toBeGreaterThan(0.01);
+    expect(h.healthy).toBe(false);
+  });
+
   it("does not treat per-beacon alerts as scheduled-job failures", () => {
     // alert_raw_write_error is best-effort and proportional to traffic, so it
     // stays on the ratio gate rather than failing the first occurrence.

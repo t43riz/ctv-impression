@@ -158,12 +158,18 @@ audit; the suite is now 258 tests — see the status update above*):
   raw-tier writes are best-effort, and a single transient R2 error used to turn
   health red for a whole day, which is how an alert gets muted. Alerts with no
   `received` rows at all are reported as a full-rate failure, not as 0%.
-- Scheduled-job alerts (`alert_export_failed`, `alert_health_check_failed`,
-  `alert_health_write_failed`, `alert_claim_release_failed`, `alert_admin_error`,
-  `alert_notify_failed`) are gated on an **absolute count** instead. They
-  fire at most once per cron run, so against a day of traffic their ratio rounds
-  to zero and clears any sane ceiling — while the export is the only permanent
+- Bounded-occurrence alerts (`alert_export_failed`, `alert_health_check_failed`,
+  `alert_health_write_failed`, `alert_claim_release_failed`,
+  `alert_admin_dsar_error`, `alert_notify_failed`) are gated on an **absolute
+  count** instead. They fire at most once per cron run — or once per erasure
+  request, for the DSAR case — so against a day of traffic their ratio rounds to
+  zero and clears any sane ceiling, while the export is the only permanent
   record and the health artifact is what external monitors read.
+- `alert_admin_error` (a throw on the read-only `/admin/report/*` routes) stays
+  on the **ratio** gate. It shares a boundary with the DSAR case but not its
+  frequency bound: the report routes are operator-invoked and unbounded, so
+  gating them absolutely would let one dashboard refresh during an upstream blip
+  hold health red for 24h. A real outage still clears the ratio ceiling.
 - `/call` is budgeted per IP (`CALL_RATE_LIMIT_PER_MINUTE`, default 60) before
   the body is read, since the read is work an unauthenticated caller can force.
   A refusal is `call_rate_limited`, is reported to the PBX as **429**, and is

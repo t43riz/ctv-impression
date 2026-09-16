@@ -135,8 +135,14 @@ const INFRA_ALERTS = [
   // never gated — so this row is the only thing standing between a stranded
   // claim and silent revenue loss. Never proportional to beacon volume.
   "alert_claim_release_failed",
-  // The admin surface threw. Rare by nature, and a DSAR erasure runs there.
-  "alert_admin_error",
+  // A DSAR erasure threw. Operator-initiated rather than scheduled, but it
+  // shares the property this list actually requires: bounded occurrence. A
+  // legally-obligated erasure that failed part-way must be fatal to health.
+  // Its read-only sibling `alert_admin_error` is deliberately NOT here — that
+  // one is unbounded (any dashboard refresh can raise it) so it stays on the
+  // ratio gate, where a genuine outage still clears the ceiling but a single
+  // transient blip does not red-light the day.
+  "alert_admin_dsar_error",
   // The alert webhook refused the notification. Reachable only when the check
   // was already red, so this is the delivery of a real failure failing. It fires
   // at most once per run, exactly like the rows above: left on the ratio gate it

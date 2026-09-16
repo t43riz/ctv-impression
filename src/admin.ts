@@ -130,6 +130,7 @@ function clampParam(raw: string | null, fallback: number, min: number, max: numb
  * a recorded outcome rather than a bare runtime 500 (see `handleAdminInner`).
  */
 export async function handleAdmin(request: Request, env: Env): Promise<Response> {
+  const path = new URL(request.url).pathname;
   try {
     return await handleAdminInner(request, env);
   } catch (err) {
@@ -138,10 +139,21 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
     // response: `AnalyticsSqlError` can quote a request that contains the
     // account id, and the caller only needs to know the route failed.
     console.log(
-      `admin_internal_error path=${new URL(request.url).pathname}`,
+      `admin_internal_error path=${path}`,
       err instanceof Error ? err.stack ?? err.message : String(err),
     );
-    recordRecon(env, "alert_admin_error", "unknown");
+    // Split by route because the two have different frequency bounds, and
+    // `INFRA_ALERTS` membership is a claim that a row can never be proportional
+    // to traffic. A DSAR throw is operator-initiated but rare and carries a
+    // legal obligation, so any occurrence should be fatal to health. The report
+    // routes are also operator-initiated but unbounded — a dashboard refreshed
+    // during an upstream blip would otherwise red-light health for 24h and page
+    // someone for a transient failure on a read-only route.
+    recordRecon(
+      env,
+      path === "/admin/dsar" ? "alert_admin_dsar_error" : "alert_admin_error",
+      "unknown",
+    );
     return json({ error: "internal_error" }, 500);
   }
 }
@@ -305,6 +317,11 @@ async function handleAdminInner(request: Request, env: Env): Promise<Response> {
           dedup_deleted: dedupDeleted,
           campaigns_scanned: dedupCampaigns,
           campaigns_planned: capped.length,
+          // Partiality is carried by this field on every response, including
+          // the failures. A caller testing `scope_complete === false` rather
+          // than a falsy check would otherwise read a hard erase failure as a
+          // complete erasure and record an Article 17 request as fulfilled.
+          scope_complete: false,
           note:
             "Dedup erasure stopped part-way. THIS REQUEST IS NOT COMPLETE — do not " +
             "record it as fulfilled; re-run once the Durable Object responds.",
@@ -332,6 +349,12 @@ async function handleAdminInner(request: Request, env: Env): Promise<Response> {
           error: "raw_erase_failed",
           detail: err instanceof Error ? err.message : String(err),
           dedup_deleted: dedupDeleted,
+          // Same contract as the dedup failure above. `raw_tier` and
+          // `campaigns_scanned` are reported too so a re-run can be scoped to
+          // what is left rather than starting blind.
+          raw_tier: raw,
+          campaigns_scanned: capped.length,
+          scope_complete: false,
           note:
             "Dedup keys for the supplied campaigns were erased, but the raw R2 tier " +
             "could not be verified. THIS REQUEST IS NOT COMPLETE — do not record it " +

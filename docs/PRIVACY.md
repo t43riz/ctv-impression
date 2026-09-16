@@ -92,6 +92,16 @@ and processing terms. LMT impressions are sent with `opt_out="true"`.
 We do not retain identifier-level data for years. The long-term tier is
 aggregate-only, satisfying storage minimization.
 
+### Data shared with an alerting endpoint (`ALERT_WEBHOOK_URL`)
+
+When set, a red nightly health check is POSTed to the operator's incident tool.
+The payload is the health artifact: outcome counts, ratios and an error string.
+It carries **no identifiers, no campaign-level rows and no samples**, and it
+must stay that way — this is the one path that leaves the Cloudflare boundary on
+a schedule rather than in response to a qualified conversion. Anything added to
+the health body is disclosed to a third party by construction. The URL itself is
+treated as a credential and is never written to the logs.
+
 ## 4. Data subject requests (DSAR / erasure)
 
 Because the IFA is hashed deterministically, a subject's data can be located by
@@ -184,8 +194,11 @@ the request again with explicit `campaigns` batches.
 **Partial failures.** If the dedup tier stops responding part-way, the response
 is `500 {"error":"dedup_erase_failed"}` with `dedup_deleted`,
 `campaigns_scanned` and `campaigns_planned` so a re-run is informed. The raw
-tier fails the same way with `raw_erase_failed`. Both mean the request is **not**
-complete.
+tier fails the same way with `raw_erase_failed`, reporting `raw_tier` and
+`campaigns_scanned` for the same reason. Both mean the request is **not**
+complete, and both carry `scope_complete: false` explicitly — the field is
+present on *every* DSAR response, so a client testing `scope_complete === false`
+reaches the same conclusion as one testing for falsiness.
 
 `RAW_RETENTION_DAYS` must be at least the raw bucket's lifecycle rule, otherwise
 objects written outside the scanned window would be missed.

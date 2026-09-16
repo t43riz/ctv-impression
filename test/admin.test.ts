@@ -101,6 +101,42 @@ describe("admin error boundary", () => {
     expect(recorded).toContain("alert_admin_error");
   });
 
+  it("classifies a DSAR throw separately from a report throw", async () => {
+    // INFRA_ALERTS asserts a row can never be proportional to traffic, and the
+    // report routes break that: they are operator-invoked and unbounded, so a
+    // dashboard refreshed during an upstream blip would red-light health for a
+    // full day. A DSAR erasure is bounded and legally obligated, so it keeps
+    // the fatal gate. Same boundary, different outcome, by path.
+    // The dedup and raw erase loops have their own handlers that return a
+    // detailed 500, so the boundary is reached via the one path that has none:
+    // enumerating the campaigns to erase, which runs before anything is
+    // deleted. A throw there means the erasure never started.
+    const { env } = makeEnv({
+      CAMPAIGNS: {
+        list: async () => {
+          throw new Error("kv list unavailable");
+        },
+        get: async () => null,
+      } as unknown as KVNamespace,
+    });
+
+    const res = await handleAdmin(
+      authed("/admin/dsar", {
+        method: "POST",
+        body: JSON.stringify({ ifa: "dev-1" }),
+        headers: { "Content-Type": "application/json" },
+      }),
+      env,
+    );
+
+    expect(res.status).toBe(500);
+    const recorded = (env.RECON as unknown as FakeAnalytics).points.map(
+      (p) => p.blobs?.[0] ?? "",
+    );
+    expect(recorded).toContain("alert_admin_dsar_error");
+    expect(recorded).not.toContain("alert_admin_error");
+  });
+
   it("does not leak the upstream error detail to the caller", async () => {
     // AnalyticsSqlError quotes the upstream response, which can carry the
     // account id and the query. That belongs in the log, not the response.
@@ -503,12 +539,21 @@ describe("admin DSAR", () => {
     raw.objects.set(`dt=${day}/h=${hash.slice(0, 4)}/hh=01/camp/a.json`, { value: "{}" });
 
     const res = await handleAdmin(dsar({ ifa: "dev-1" }), env);
-    const body = (await res.json()) as { error: string; detail: string; note: string };
+    const body = (await res.json()) as {
+      error: string;
+      detail: string;
+      note: string;
+      scope_complete: boolean;
+    };
 
     expect(res.status).toBe(500);
     expect(body.error).toBe("raw_erase_failed");
     expect(body.detail).toContain("customMetadata");
     expect(body.note).toContain("NOT COMPLETE");
+    // Partiality lives in the field, not only in the prose. A client testing
+    // `scope_complete === false` must not read a hard failure as a completed
+    // erasure just because the field was absent.
+    expect(body.scope_complete).toBe(false);
     // The object must not have been deleted on a failure path.
     expect(raw.objects.size).toBe(1);
   });
@@ -562,12 +607,14 @@ describe("admin DSAR", () => {
       error: string;
       note: string;
       campaigns_planned: number;
+      scope_complete: boolean;
     };
 
     expect(res.status).toBe(500);
     expect(body.error).toBe("dedup_erase_failed");
     expect(body.note).toContain("NOT COMPLETE");
     expect(body.campaigns_planned).toBe(1);
+    expect(body.scope_complete).toBe(false);
     // Nothing was erased, and the response says so rather than implying success.
     expect(dedupState.sql.seen.size).toBe(1);
   });

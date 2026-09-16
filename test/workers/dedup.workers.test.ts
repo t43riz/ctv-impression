@@ -84,13 +84,20 @@ describe("DedupStore under workerd", () => {
   });
 
   it("expires a key once its TTL has passed", async () => {
-    // A 1-second TTL, then a real wait: the expiry comparison runs against
+    // A short TTL, then a real wait: the expiry comparison runs against
     // SQLite's stored integer, not a fake's in-memory map.
+    //
+    // The seed pair uses a 2s TTL rather than 1s on purpose. `exp` is
+    // `now + ttl` at whole-second granularity and a duplicate requires
+    // `exp > now`, so with ttl=1 a wall-clock second boundary falling between
+    // these two round trips makes the second call see `exp === now` and report
+    // first-seen. That is a ~1% flake, and a flaky test in the suite that
+    // exists to be the trustworthy runtime oracle is worse than no test.
     const shard = "camp-ttl";
-    expect(await isFirstSeen(env.DEDUP, shard, "short-lived", 1)).toBe(true);
-    expect(await isFirstSeen(env.DEDUP, shard, "short-lived", 1)).toBe(false);
+    expect(await isFirstSeen(env.DEDUP, shard, "short-lived", 2)).toBe(true);
+    expect(await isFirstSeen(env.DEDUP, shard, "short-lived", 2)).toBe(false);
 
-    await new Promise((resolve) => setTimeout(resolve, 1100));
+    await new Promise((resolve) => setTimeout(resolve, 2100));
 
     // The window has closed, so the device counts again rather than being
     // suppressed forever.
