@@ -199,7 +199,9 @@ for external monitors. A health check that cannot complete writes
 artifact in place, so a broken check and a healthy system are distinguishable.
 Both cron paths record `alert_export_failed` / `alert_health_check_failed` in
 the recon ledger, and those are gated on an **absolute count** — a once-per-run
-failure can never register as a ratio against beacon volume.
+failure can never register as a ratio against beacon volume. If R2 refuses the
+artifact itself, `alert_health_write_failed` is recorded for the same reason:
+that failure cannot be reported inside the artifact it failed to write.
 
 > `/healthz` is **liveness only** and answers 200 whenever the isolate is
 > serving; that is deliberate, so a degraded backend cannot pull the pixel out
@@ -245,6 +247,11 @@ npm run deploy
   key, so SIP-style identifiers (`localpart@host`) are accepted rather than
   rejected. Without the deadline an unauthenticated caller could hold the
   isolate open by trickling a body that the HMAC cannot be checked against.
+- `/call` is **budgeted per IP** (`CALL_RATE_LIMIT_PER_MINUTE`, default 60) and
+  answers **429** before the signature is checked. That status is **retryable and
+  the PBX must retry it**, like `capi_error`: the conversion was neither sent nor
+  claimed, so a PBX that treats 429 as final drops it silently. Set the budget
+  above the PBX's peak calls per minute.
 - The tag signature binds `advertiser_id` as well as campaign/creative/expiry,
   so a captured (public) tag URL cannot be re-pointed at another advertiser.
   `ifa`/`lmt` cannot be bound — the ad server substitutes them on the device.

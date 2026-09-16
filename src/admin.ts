@@ -65,6 +65,15 @@ const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_DSAR_CAMPAIGN_PAGES = 20;
 
 /**
+ * Safety bound on a caller-supplied campaign narrowing. Each campaign costs one
+ * Durable Object round trip (two during a salt rotation) before the raw-tier
+ * scan even starts, and the request has a wall-clock budget; an unbounded list
+ * runs out mid-erase and leaves an unhandled 500 with no record of what was
+ * already deleted.
+ */
+const MAX_DSAR_REQUESTED_CAMPAIGNS = 200;
+
+/**
  * Enumerate allowlisted campaign ids from the CAMPAIGNS namespace.
  *
  * `complete` is false when the listing was cut short, so the caller can report
@@ -170,7 +179,14 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
   if (path === "/admin/dsar" && request.method === "POST") {
     let body: { ifa?: string; campaigns?: string[] };
     try {
-      body = (await request.json()) as typeof body;
+      const parsed: unknown = await request.json();
+      // `null` (and a bare scalar) parses successfully, and the first property
+      // read would then throw: a malformed body must not become an unhandled 500
+      // on the one route that performs an irreversible erasure.
+      if (parsed === null || typeof parsed !== "object") {
+        return json({ error: "bad json" }, 400);
+      }
+      body = parsed as typeof body;
     } catch {
       return json({ error: "bad json" }, 400);
     }
@@ -178,13 +194,30 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
     if (!ifa) {
       return json({ error: "ifa required" }, 400);
     }
+    // A string here would reach `.filter` and throw, again as a 500.
+    if (body.campaigns !== undefined && !Array.isArray(body.campaigns)) {
+      return json({ error: "campaigns must be an array of campaign ids" }, 400);
+    }
+    if ((body.campaigns ?? []).length > MAX_DSAR_REQUESTED_CAMPAIGNS) {
+      return json(
+        {
+          error: "too_many_campaigns",
+          note:
+            `At most ${MAX_DSAR_REQUESTED_CAMPAIGNS} campaigns may be supplied. ` +
+            "Omit `campaigns` to erase across every allowlisted campaign.",
+        },
+        400,
+      );
+    }
 
     // The dedup store is sharded by campaign, so an erasure is only complete if
     // every campaign the subject could appear in is visited. A caller-supplied
     // list cannot be verified, and silently skipping an omitted campaign while
     // answering 200 would certify an erasure that did not happen. Enumerate the
     // allowlist instead and treat the caller's list as an optional narrowing.
-    const requested = (body.campaigns ?? []).filter((c) => ID_RE.test(c));
+    const requested = (body.campaigns ?? []).filter(
+      (c) => typeof c === "string" && ID_RE.test(c),
+    );
     const enumerated = await listCampaigns(env);
     const campaigns = requested.length > 0 ? requested : enumerated.ids;
 
@@ -210,10 +243,31 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
     }
 
     let dedupDeleted = 0;
-    for (const campaign of campaigns) {
-      for (const h of hashes) {
-        dedupDeleted += await eraseByHash(env.DEDUP, campaign, h);
+    let dedupCampaigns = 0;
+    try {
+      for (const campaign of campaigns) {
+        for (const h of hashes) {
+          dedupDeleted += await eraseByHash(env.DEDUP, campaign, h);
+        }
+        dedupCampaigns++;
       }
+    } catch (err) {
+      // Same rule as the raw tier below: an erase that did not finish is not a
+      // success, and the caller needs to know how far it got so a re-run is
+      // informed rather than blind.
+      return json(
+        {
+          error: "dedup_erase_failed",
+          detail: err instanceof Error ? err.message : String(err),
+          dedup_deleted: dedupDeleted,
+          campaigns_scanned: dedupCampaigns,
+          campaigns_planned: campaigns.length,
+          note:
+            "Dedup erasure stopped part-way. THIS REQUEST IS NOT COMPLETE — do not " +
+            "record it as fulfilled; re-run once the Durable Object responds.",
+        },
+        500,
+      );
     }
 
     const rawDays = configInt(env.RAW_RETENTION_DAYS, 31);

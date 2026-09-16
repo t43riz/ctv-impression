@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import worker from "../src/index";
 import { DedupStore } from "../src/dedup";
 import { RecentImpressions } from "../src/recent";
@@ -571,4 +571,30 @@ describe("scheduled jobs", () => {
     await run(h.env, "0 2 * * *");
     expect(outcomes(h.recon)).toContain("alert_export_failed");
   });
+
+  it("records an alert when the health artifact cannot be written", async () => {
+    // R2 refusing the artifact is the one failure that cannot be reported inside
+    // the artifact itself, so the ledger is the only place a monitor can see it.
+    const h = makeHarness({ ACCOUNT_ID: "acct-123", CF_API_TOKEN: "sql-read-token" });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ meta: [], data: [], rows: 0 }), { status: 200 }),
+      ),
+    );
+    h.archive.put = async () => {
+      throw new Error("r2 down");
+    };
+
+    await run(h.env, "30 3 * * *");
+
+    const recorded = outcomes(h.recon);
+    // The check itself succeeded, so this row is attributable to the write.
+    expect(recorded).not.toContain("alert_health_check_failed");
+    expect(recorded).toContain("alert_health_write_failed");
+  });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });

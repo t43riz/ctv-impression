@@ -437,6 +437,65 @@ describe("admin DSAR", () => {
     // The object must not have been deleted on a failure path.
     expect(raw.objects.size).toBe(1);
   });
+
+  it("rejects a null body and a non-array campaigns list without throwing", async () => {
+    // `null` parses as valid JSON and a bare string parses too, so both reach
+    // the property reads below. On the one route that erases irreversibly, a
+    // malformed body must be a 400 rather than an unhandled 500.
+    const { env } = makeEnv();
+    expect((await handleAdmin(dsar(null), env)).status).toBe(400);
+    expect((await handleAdmin(dsar({ ifa: "dev-1", campaigns: "dev-1" }), env)).status).toBe(400);
+  });
+
+  it("refuses an oversized caller campaign list before touching a Durable Object", async () => {
+    // Each campaign costs a DO round trip (two during a rotation) ahead of the
+    // raw-tier scan. An unbounded list exhausts the request budget mid-erase and
+    // returns a 500 with no record of what was deleted.
+    let doCalls = 0;
+    const { env } = makeEnv({
+      DEDUP: fakeDoNamespace(async () => {
+        doCalls++;
+        return Response.json({ deleted: 0 });
+      }),
+    });
+    const many = Array.from({ length: 201 }, (_, i) => `camp${i}`);
+
+    const res = await handleAdmin(dsar({ ifa: "dev-1", campaigns: many }), env);
+    const body = (await res.json()) as { error: string; note: string };
+
+    expect(res.status).toBe(400);
+    expect(body.error).toBe("too_many_campaigns");
+    expect(body.note).toContain("Omit `campaigns`");
+    expect(doCalls).toBe(0);
+  });
+
+  it("reports a partial dedup erase instead of throwing", async () => {
+    // A Durable Object that stops responding part-way through must not turn into
+    // an unhandled 500: the caller has to learn that the erasure is incomplete
+    // and how far it got, exactly as the raw-tier path already reports.
+    const { env, dedupState } = makeEnv({
+      DEDUP: fakeDoNamespace(async () => {
+        throw new Error("dedup do unavailable");
+      }),
+    });
+    const { hashIfa } = await import("../src/lib/crypto");
+    const hash = await hashIfa(env.IFA_HASH_SALT as string, "dev-1");
+    dedupState.sql.seen.set(hash, Math.floor(Date.now() / 1000) + 1000);
+
+    const res = await handleAdmin(dsar({ ifa: "dev-1", campaigns: ["camp"] }), env);
+    const body = (await res.json()) as {
+      error: string;
+      note: string;
+      campaigns_planned: number;
+    };
+
+    expect(res.status).toBe(500);
+    expect(body.error).toBe("dedup_erase_failed");
+    expect(body.note).toContain("NOT COMPLETE");
+    expect(body.campaigns_planned).toBe(1);
+    // Nothing was erased, and the response says so rather than implying success.
+    expect(dedupState.sql.seen.size).toBe(1);
+  });
 });
 
 describe("admin method guards", () => {

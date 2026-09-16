@@ -198,11 +198,19 @@ export function validateCallEvent(raw: string, nowSeconds: number): CallValidati
  * ledger row was written. A KV or Durable Object outage — exactly what the
  * ledger exists to surface — therefore left `callAttempts` flat and
  * `callHealthy` green. Every exit from `/call` must leave an outcome behind.
+ *
+ * It also releases a claim that was taken but whose outcome is unknown: the
+ * claim is captured before it is attempted, so a throw from the claim call
+ * itself (a Durable Object that stored the key and then returned an unparseable
+ * body, say) does not strand it. A stranded claim answers the PBX's retry
+ * "duplicate" and the conversion is lost.
  */
 export async function handleCall(request: Request, env: Env): Promise<Response> {
+  const held: HeldClaim = { claimKey: null };
   try {
-    return await handleCallInner(request, env);
+    return await handleCallInner(request, env, held);
   } catch (err) {
+    await releaseHeldClaim(env, held);
     console.log(
       "call_internal_error stage=pre_claim",
       err instanceof Error ? err.stack ?? err.message : String(err),
@@ -212,7 +220,27 @@ export async function handleCall(request: Request, env: Env): Promise<Response> 
   }
 }
 
-async function handleCallInner(request: Request, env: Env): Promise<Response> {
+/** The idempotency claim a single `/call` currently holds, if any. */
+interface HeldClaim {
+  claimKey: string | null;
+}
+
+/**
+ * Release the claim this call holds, if it still holds one. Safe to call twice:
+ * the key is cleared first, so a claim is never released that this invocation
+ * did not take (a duplicate must not drop the original call's claim).
+ */
+async function releaseHeldClaim(env: Env, held: HeldClaim): Promise<void> {
+  const key = held.claimKey;
+  held.claimKey = null;
+  if (key !== null) await releaseClaim(env, key);
+}
+
+async function handleCallInner(
+  request: Request,
+  env: Env,
+  held: HeldClaim,
+): Promise<Response> {
   if (request.method !== "POST") return json({ status: "method_not_allowed" }, 405);
 
   // A placeholder signing key means anyone can forge a webhook.
@@ -312,8 +340,14 @@ async function handleCallInner(request: Request, env: Env): Promise<Response> {
   // to start with the same characters.
   const claimKey = `call:${encodeURIComponent(call.callId)}:${mapping.creativeId}|`;
   const claimTtl = configInt(env.CALL_DEDUP_HOURS, 48) * 3600;
+  // Captured *before* the claim is attempted: the call can throw after the
+  // Durable Object has stored the key, and the outer boundary can only release
+  // what it can name.
+  held.claimKey = claimKey;
   const first = await isFirstSeen(env.DEDUP, "calls", claimKey, claimTtl);
   if (!first) {
+    // This invocation never owned the claim, so it must not release it.
+    held.claimKey = null;
     recordCallOutcome(env, "duplicate", campaign);
     return json({ status: "duplicate" });
   }
@@ -374,7 +408,7 @@ async function handleCallInner(request: Request, env: Env): Promise<Response> {
       // or a placeholder event group would acknowledge every qualified call as
       // "skipped" and block the PBX's retries for the whole
       // CALL_DEDUP_HOURS window after the config is fixed.
-      await releaseClaim(env, claimKey);
+      await releaseHeldClaim(env, held);
       recordCallOutcome(env, "skipped", campaign);
       return json({
         status: "skipped",
@@ -392,7 +426,7 @@ async function handleCallInner(request: Request, env: Env): Promise<Response> {
     if (!capi.ok) {
       // Release the claim so the PBX's retry can succeed; a conversion that did
       // not land must not be remembered as processed.
-      await releaseClaim(env, claimKey);
+      await releaseHeldClaim(env, held);
       recordCallOutcome(env, "capi_error", campaign);
       return json(
         {
@@ -431,7 +465,7 @@ async function handleCallInner(request: Request, env: Env): Promise<Response> {
     // Without this, a throw anywhere above (matching store, buildPayload,
     // network) would leave the claim set and return a 500 that the PBX may
     // treat as final, permanently losing a real conversion.
-    await releaseClaim(env, claimKey);
+    await releaseHeldClaim(env, held);
     console.log(
       `call_internal_error callId=${call.callId}`,
       err instanceof Error ? err.stack ?? err.message : String(err),

@@ -158,6 +158,17 @@ audit; the suite is now 258 tests — see the status update above*):
   raw-tier writes are best-effort, and a single transient R2 error used to turn
   health red for a whole day, which is how an alert gets muted. Alerts with no
   `received` rows at all are reported as a full-rate failure, not as 0%.
+- Scheduled-job alerts (`alert_export_failed`, `alert_health_check_failed`,
+  `alert_health_write_failed`) are gated on an **absolute count** instead. They
+  fire at most once per cron run, so against a day of traffic their ratio rounds
+  to zero and clears any sane ceiling — while the export is the only permanent
+  record and the health artifact is what external monitors read.
+- `/call` is budgeted per IP (`CALL_RATE_LIMIT_PER_MINUTE`, default 60) before
+  the body is read, since the read is work an unauthenticated caller can force.
+  A refusal is `call_rate_limited`, is reported to the PBX as **429**, and is
+  part of the gated rejection set, so a mis-set budget cannot present as a
+  healthy conversion path. It must be set above the PBX's peak rate, and the PBX
+  must treat 429 as retryable (`docs/ATTRIBUTION.md` §9).
 - Every health ceiling (`HEALTH_MAX_REJECT_RATIO`, `HEALTH_MAX_ALERT_RATIO`,
   `HEALTH_MAX_CALL_ERROR_RATIO`, `HEALTH_MAX_CALL_REJECT_RATIO`) is read from
   the environment with the documented default as a fallback.

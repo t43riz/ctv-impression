@@ -125,7 +125,12 @@ const CALL_SEND_ERRORS = ["call_capi_error", "call_internal_error"] as const;
  * occurrence is a failure: these fire once per cron run, so they can never
  * reach a meaningful ratio against beacon volume.
  */
-const INFRA_ALERTS = ["alert_export_failed", "alert_health_check_failed"] as const;
+const INFRA_ALERTS = [
+  "alert_export_failed",
+  "alert_health_check_failed",
+  // R2 refused the health artifact itself, so the only remaining signal is here.
+  "alert_health_write_failed",
+] as const;
 
 /**
  * Reconcile ingest outcomes from raw `ingest_recon` rows. Pure, so the

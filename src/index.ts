@@ -314,5 +314,9 @@ async function runHealthCheck(env: Env): Promise<void> {
       "alert_health_write_failed",
       err instanceof Error ? err.message : String(err),
     );
+    // Recorded in the ledger as well, unlike the two alerts above: this one
+    // cannot appear in the artifact it failed to write, so the ledger is the
+    // only remaining place a downstream monitor can see it.
+    recordRecon(env, "alert_health_write_failed", "unknown");
   }
 }

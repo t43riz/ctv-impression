@@ -41,6 +41,14 @@ describe("computeReconHealth", () => {
     expect(h.healthy).toBe(false);
   });
 
+  it("fails when the health artifact itself could not be written", () => {
+    // R2 refusing the artifact cannot be reported inside the artifact, so the
+    // ledger is the only place left to see it.
+    const h = computeReconHealth(rows(["alert_health_write_failed", 1]));
+    expect(h.infraAlerts).toBe(1);
+    expect(h.healthy).toBe(false);
+  });
+
   it("does not treat per-beacon alerts as scheduled-job failures", () => {
     // alert_raw_write_error is best-effort and proportional to traffic, so it
     // stays on the ratio gate rather than failing the first occurrence.

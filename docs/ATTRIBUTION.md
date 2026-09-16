@@ -226,7 +226,14 @@ return `{"status":"not_qualified"}` and do not fire.
 placeholder `event_group_id`) | `not_qualified` | `duplicate` | `unauthorized` |
 `stale_timestamp` | `unknown_number` | `bad_fields` | `bad_json` |
 `not_configured` (placeholder `CALL_HMAC_KEY`) | `payload_too_large` |
-`capi_error` (HTTP 502, safe for the PBX to retry).
+`rate_limited` (HTTP 429) | `capi_error` (HTTP 502).
+
+**Two statuses are safe for the PBX to retry, and it must retry both:**
+`capi_error` (502) and `rate_limited` (429). A 429 means the per-IP budget
+(`CALL_RATE_LIMIT_PER_MINUTE`, default 60/min) was exceeded, and it is answered
+*before* the signature is checked, so the conversion has not been sent and has
+not been claimed. Treating it as final silently drops billable conversions. Any
+retry of `fired` or `duplicate` is idempotent by `callId`.
 
 `skipped` means **nothing was sent**, and the claim is released so the PBX's
 next attempt runs again once the configuration is fixed — a deployment that
@@ -238,20 +245,24 @@ was delivery (`live`) or validation only (`test`); the ledger distinguishes the
 two as `call_fired` and `call_dry_run`, so a Worker left on test mode is not
 reported as a fully-delivered conversion path.
 
-Every response except `capi_error` also carries `matched`/`candidates`/`gate`
-diagnostics. `confidence` is included only when a score was actually computed:
-the candidate-ceiling short-circuit returns `confidenceOmitted:
-"candidate_ceiling"` instead, so a bare `0` can never be mistaken for a real
-score.
+**Match diagnostics are off by default.** With `CALL_DEBUG_RESPONSE=true` every
+response except `capi_error` also carries `matched`/`candidates`/`gate`, and
+`confidence` when a score was actually computed (the candidate-ceiling
+short-circuit returns `confidenceOmitted: "candidate_ceiling"` instead, so a
+bare `0` can never be mistaken for a real score). They are suppressed in
+production because `candidates` is the count of impressions the creative served
+inside the match window, which discloses delivery volume to anyone who can reach
+the endpoint. Do not enable it against a shared or public deployment.
 
 Every outcome is also recorded in the reconciliation ledger as `call_*`
-(`call_fired`, `call_dry_run`, `call_skipped`, `call_unauthorized`,
-`call_unknown_number`, `call_bad_request`, `call_not_qualified`,
-`call_bad_number_mapping`, `call_not_configured`, `call_duplicate`,
-`call_capi_error`, `call_internal_error`), which is what makes a silent "every
-call is refused" or "all conversions skipped" state visible on `/admin/health`.
-Health gates on failed sends and on refusals, but deliberately not on absorbed
-replays or an intentionally skipped/dry-run send.
+(`call_fired`, `call_dry_run`, `call_skipped`, `call_rate_limited`,
+`call_unauthorized`, `call_unknown_number`, `call_bad_request`,
+`call_not_qualified`, `call_bad_number_mapping`, `call_not_configured`,
+`call_duplicate`, `call_capi_error`, `call_internal_error`), which is what makes
+a silent "every call is refused" or "all conversions skipped" state visible on
+`/admin/health`. Health gates on failed sends and on refusals (including
+`call_rate_limited`), but deliberately not on absorbed replays or an
+intentionally skipped/dry-run send.
 
 ---
 
@@ -266,6 +277,9 @@ replays or an intentionally skipped/dry-run send.
 | `CALL_MAX_SKEW_SECONDS` | var | Accepted clock skew on `x-timestamp` (default 300) |
 | `CALL_DEDUP_HOURS` | var | How long a processed `callId` is remembered (default 48) |
 | `CALL_BODY_TIMEOUT_MS` | var | Deadline for reading a webhook body (default 10000) |
+| `CALL_RATE_LIMIT_PER_MINUTE` | var | Per-IP `/call` budget, applied before the body is read; `0` disables (default 60). **Must exceed the PBX's peak calls per minute**, or 429s drop conversions |
+| `CALL_DEBUG_RESPONSE` | var | `true` echoes match diagnostics in the response. Off by default: the candidate count discloses the creative's in-window delivery volume |
+| `IP_CAP_SALT` | secret | Pepper for the coarse IP+hour frequency cap on non-attributable (LMT / child-directed) traffic. Falls back to `IFA_HASH_SALT`, but setting it means a salt rotation does not reset that cap |
 | `HTTP_TIMEOUT_MS` | var | Outbound CAPI/SQL request timeout (default 5000) |
 | `CAPI_MAX_ATTEMPTS` | var | Conversion send attempts (default 2; UA uses `UA_CAPI_MAX_ATTEMPTS`, default 1) |
 | `CAPI_MODE` | var | `test` (default, no ingestion) or `live` |
@@ -291,3 +305,13 @@ wrangler kv key put --binding NUMBERS "number:18005550100" \
 3. Set `CAPI_API_KEY` secret and `CAPI_EVENT_GROUP_ID`; flip `CAPI_MODE=live`.
 4. Validate a few real calls end-to-end; confirm conversions appear in Roku.
 5. Reconcile conversion volume vs. qualified-call volume.
+6. Confirm the PBX's peak calls per minute and set
+   `CALL_RATE_LIMIT_PER_MINUTE` above it, then confirm with the PBX team that it
+   retries a **429** as well as a **502**. A throttled call is not sent and not
+   claimed, so a PBX that treats 429 as final loses the conversion silently.
+7. Confirm the registry entries in `NUMBERS` pass validation: `creativeId`,
+   `campaignId`, `advertiserId` and `eventGroupId` must match
+   `^[A-Za-z0-9_-]{1,64}$`, `platform` must be `roku` or `ua`, and
+   `qualifySeconds` must be a number in `0..86400`. A malformed entry is
+   answered `bad_number_mapping` (500) rather than silently defaulting.
+8. Set `IP_CAP_SALT` and keep it stable across `IFA_HASH_SALT` rotations.

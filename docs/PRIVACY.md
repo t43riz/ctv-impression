@@ -126,10 +126,17 @@ assessment.
 
 ## 8. DSAR runbook (implemented)
 
-`POST /admin/dsar` with `{"ifa": "<raw ifa>", "campaigns": ["camp1", ...]}`:
+`POST /admin/dsar` with `{"ifa": "<raw ifa>"}`. The `campaigns` array is
+**optional and normally omitted**: the dedup store is sharded by campaign, so a
+complete erasure has to visit every campaign the subject could appear in, and
+the endpoint enumerates the `CAMPAIGNS` allowlist rather than trusting a
+caller-supplied list.
 
 1. Hashes the IFA with the current salt (and previous salt, if rotating).
-2. Deletes matching keys from the dedup Durable Object per campaign shard.
+2. Deletes matching keys from the dedup Durable Object per campaign shard. If a
+   Durable Object stops responding part-way through, the endpoint answers
+   `500 {"error":"dedup_erase_failed"}` with `dedup_deleted` and
+   `campaigns_scanned`, rather than throwing or implying the erasure finished.
 3. Deletes matching rows from the raw R2 tier, scanning `RAW_RETENTION_DAYS`
    (default 31) days and filtering each day by the hash's key shard. The
    response reports `raw_tier.scanned`, `raw_tier.deleted`, `raw_tier.daysScanned`
@@ -138,6 +145,15 @@ assessment.
    rows for a single identifier).
 4. `RecentImpressions` self-purges within the attribution window; AE rows
    expire in 3 months (hash only); aggregates hold no identifiers.
+
+**Scope reporting.** A response with `scope_complete: false` (HTTP **206**) means
+the scan did not provably cover every shard: either `campaigns` was supplied by
+the caller and cannot be verified exhaustive, or the allowlist listing was
+truncated. Only the full-enumeration path returns `200` with
+`scope_complete: true`. Supplying more than 200 campaigns is refused with
+`400 {"error":"too_many_campaigns"}` — each one costs a Durable Object round
+trip ahead of the raw-tier scan, and a list that large cannot finish inside one
+request.
 
 `RAW_RETENTION_DAYS` must be at least the raw bucket's lifecycle rule, otherwise
 objects written outside the scanned window would be missed.

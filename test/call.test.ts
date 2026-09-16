@@ -220,6 +220,56 @@ describe("handleCall error boundary", () => {
     expect(res.status).toBe(502);
     expect(callOutcomes(h.recon)).toEqual(["call_internal_error"]);
   });
+
+  it("releases a claim that was taken when the claim response is unreadable", async () => {
+    // The store takes the claim and *then* the call fails (a Durable Object that
+    // wrote the key and returned a body we cannot parse). The outer boundary
+    // records the outcome; without releasing the claim it did not take itself,
+    // the PBX's retry is answered "duplicate" and the conversion is lost.
+    const state = fakeDoState();
+    const store = new DedupStore(state.state);
+    const h = makeCallEnv({
+      DEDUP: fakeDoNamespace(async (_shard, request) => {
+        const res = await store.fetch(request);
+        // Corrupt only the claim response, so the release path stays real.
+        return new URL(request.url).pathname === "/check"
+          ? new Response("not json", { status: 200 })
+          : res;
+      }),
+    });
+
+    const res = await handleCall(await h.request(), h.env);
+
+    expect(res.status).toBe(502);
+    expect(callOutcomes(h.recon)).toEqual(["call_internal_error"]);
+    expect(state.sql.seen.size).toBe(0);
+  });
+
+  it("leaves the claim of an absorbed replay in place", async () => {
+    // The duplicate path must not disturb the claim it just relied on, or the
+    // replay protection that refused the request is undone by that same
+    // request. Clearing `held.claimKey` there is defensive — nothing after it
+    // can throw today — so what this pins is the invariant rather than a
+    // reachable branch: a replayed call ends with the original claim still
+    // held.
+    const h = makeCallEnv({
+      CAPI_MODE: "live",
+      CAPI_API_KEY: "live-key",
+      CAPI_EVENT_GROUP_ID: "grp_live",
+    });
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => new Response("{}", { status: 200 });
+    try {
+      await handleCall(await h.request(), h.env);
+      expect(h.seen.size).toBe(1);
+
+      const replay = await handleCall(await h.request(), h.env);
+      expect(await statusOf(replay)).toBe("duplicate");
+      expect(h.seen.size).toBe(1);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
 });
 
 describe("handleCall registry validation", () => {
