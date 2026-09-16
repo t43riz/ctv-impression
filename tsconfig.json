@@ -17,5 +17,7 @@
     "noEmit": true
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.mjs"],
-  "exclude": ["node_modules"]
+  // Typechecked by test/workers/tsconfig.json instead: those specs import
+  // `cloudflare:test`, which only resolves with the pool's types loaded.
+  "exclude": ["node_modules", "test/workers"]
 }

@@ -8,7 +8,7 @@ import {
 import { isFirstSeen } from "./dedup";
 import { recordRecent } from "./recent";
 import { pixelResponse } from "./lib/pixel";
-import { configInt } from "./lib/http";
+import { configInt, postJson } from "./lib/http";
 import { runExport } from "./export";
 import { handleCall } from "./call";
 import { handleAdmin } from "./admin";
@@ -167,7 +167,13 @@ async function handlePixel(
         region: cfFull?.region ?? "",
         city: cfFull?.city ?? "",
         postal: "",
-        lmt: !imp.ifaPresent,
+        // The device's actual opt-out signal, not the availability of its
+        // identifier. These differ: an unexpanded `[[[RIDA]]]` macro leaves
+        // `ifaPresent` false on a device that opted out of nothing, and this
+        // field becomes `opt_out` on the conversion payload (src/lib/capi.ts).
+        // Deriving it from `ifaPresent` reported a fabricated opt-out to the
+        // platform and suppressed attribution the user never declined.
+        lmt: imp.lmt,
       };
       // A non-finite window would make the DO's purge cutoff NaN and retain raw
       // IP/RIDA indefinitely, so fall back rather than propagate NaN.
@@ -318,5 +324,46 @@ async function runHealthCheck(env: Env): Promise<void> {
     // cannot appear in the artifact it failed to write, so the ledger is the
     // only remaining place a downstream monitor can see it.
     recordRecon(env, "alert_health_write_failed", "unknown");
+  }
+
+  await notifyIfUnhealthy(env, body);
+}
+
+/**
+ * Deliver a red health result to `ALERT_WEBHOOK_URL`.
+ *
+ * The artifact in R2 is a record, not a notification: nothing reads it on a
+ * schedule, so every health signal the ledger produces stops at a file. This is
+ * the one push in the system. It is best-effort and deliberately narrow — a
+ * failure to alert must not fail the cron or mask the health result itself.
+ *
+ * Unset by default: with no endpoint configured the behaviour is exactly as
+ * before, so this cannot break a deployment that has not opted in.
+ */
+async function notifyIfUnhealthy(env: Env, body: Record<string, unknown>): Promise<void> {
+  const url = env.ALERT_WEBHOOK_URL?.trim();
+  if (!url || body.healthy === true) return;
+
+  try {
+    const res = await postJson(
+      url,
+      {
+        text:
+          `CTV impression worker: health check FAILED at ${String(body.ts)}` +
+          (body.error ? ` (${String(body.error)})` : ""),
+        health: body,
+      },
+      { timeoutMs: configInt(env.HTTP_TIMEOUT_MS, 5000), attempts: 2 },
+    );
+    if (!res.ok) {
+      console.log(`alert_notify_failed status=${res.status}`);
+      recordRecon(env, "alert_notify_failed", "unknown");
+    }
+  } catch (err) {
+    console.log(
+      "alert_notify_failed",
+      err instanceof Error ? err.message : String(err),
+    );
+    recordRecon(env, "alert_notify_failed", "unknown");
   }
 }

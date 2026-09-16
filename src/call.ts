@@ -6,7 +6,7 @@ import { matchRecent } from "./recent";
 import { areaCodeToState } from "./lib/phone";
 import { buildCapiPayload, sendToCapi } from "./lib/capi";
 import { buildUaCapiPayload, sendToUaCapi } from "./lib/capi_ua";
-import { recordCallOutcome } from "./lib/recon";
+import { recordCallOutcome, recordRecon } from "./lib/recon";
 
 /**
  * /call ingest: the PBX POSTs a qualified-call webhook here on call end.
@@ -210,14 +210,36 @@ export async function handleCall(request: Request, env: Env): Promise<Response> 
   try {
     return await handleCallInner(request, env, held);
   } catch (err) {
-    await releaseHeldClaim(env, held);
+    // Recorded before the release, not after: this is the last boundary before
+    // the runtime, so anything that throws here produces the bare 500 with no
+    // ledger row that this handler exists to prevent. `releaseHeldClaim`
+    // swallows its own failures today, but the ordering must not depend on it.
     console.log(
       "call_internal_error stage=pre_claim",
       err instanceof Error ? err.stack ?? err.message : String(err),
     );
     recordCallOutcome(env, "internal_error", "unknown");
-    return json({ status: "internal_error" }, 502);
+    await releaseHeldClaim(env, held);
+    return retryable({ status: "internal_error" });
   }
+}
+
+/**
+ * A fault the PBX should retry: the conversion was neither sent nor claimed.
+ *
+ * 503 rather than 502 — the fault may be ours, and 502 asserts an upstream
+ * returned an invalid response. `Retry-After` puts the contract in the response
+ * instead of relying on the PBX reading docs/ATTRIBUTION.md, since a PBX that
+ * treats a 5xx as final drops a real conversion silently.
+ */
+function retryable(body: Record<string, unknown>, retryAfterSeconds = 30): Response {
+  return new Response(JSON.stringify(body), {
+    status: 503,
+    headers: {
+      "Content-Type": "application/json",
+      "Retry-After": String(retryAfterSeconds),
+    },
+  });
 }
 
 /** The idempotency claim a single `/call` currently holds, if any. */
@@ -426,10 +448,13 @@ async function handleCallInner(
     if (!capi.ok) {
       // Release the claim so the PBX's retry can succeed; a conversion that did
       // not land must not be remembered as processed.
-      await releaseHeldClaim(env, held);
       recordCallOutcome(env, "capi_error", campaign);
-      return json(
-        {
+      await releaseHeldClaim(env, held);
+      // 502 is accurate here — the conversion API is genuinely an upstream that
+      // answered badly — but it carries Retry-After for the same reason the 503
+      // does: the claim was released, so this is safe and necessary to retry.
+      return new Response(
+        JSON.stringify({
           status: "capi_error",
           ...summary,
           capi: {
@@ -439,8 +464,11 @@ async function handleCallInner(
             skipped: capi.skipped,
             attempts: capi.attempts,
           },
+        }),
+        {
+          status: 502,
+          headers: { "Content-Type": "application/json", "Retry-After": "30" },
         },
-        502,
       );
     }
 
@@ -465,13 +493,13 @@ async function handleCallInner(
     // Without this, a throw anywhere above (matching store, buildPayload,
     // network) would leave the claim set and return a 500 that the PBX may
     // treat as final, permanently losing a real conversion.
-    await releaseHeldClaim(env, held);
     console.log(
       `call_internal_error callId=${call.callId}`,
       err instanceof Error ? err.stack ?? err.message : String(err),
     );
     recordCallOutcome(env, "internal_error", campaign);
-    return json({ status: "internal_error" }, 502);
+    await releaseHeldClaim(env, held);
+    return retryable({ status: "internal_error" });
   }
 }
 
@@ -547,8 +575,15 @@ async function readBoundedText(
 }
 
 /**
- * Release an idempotency claim so a retry can succeed. Erasure failure is
- * logged but not fatal: the caller is already on an error path.
+ * Release an idempotency claim so a retry can succeed. Erasure failure is not
+ * fatal to this request — the caller is already on an error path — but it is
+ * recorded, not just logged.
+ *
+ * A release that fails strands the claim, and the PBX's retry is then answered
+ * `duplicate`, which `monitor.ts` reports and deliberately never gates (a
+ * healthy creative produces real duplicates constantly). So the lost conversion
+ * would otherwise come to rest in the one bucket that cannot alarm. The ledger
+ * row is the only signal that separates it from an ordinary replay.
  */
 async function releaseClaim(env: Env, claimKey: string): Promise<void> {
   try {
@@ -558,5 +593,6 @@ async function releaseClaim(env: Env, claimKey: string): Promise<void> {
       `claim_release_failed key=${claimKey}`,
       err instanceof Error ? err.message : String(err),
     );
+    recordRecon(env, "alert_claim_release_failed", "unknown");
   }
 }

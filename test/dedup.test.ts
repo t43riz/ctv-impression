@@ -28,12 +28,12 @@ describe("DedupStore /check", () => {
   });
 
   it("admits exactly one winner when the same key arrives concurrently", async () => {
-    // The whole dedup guarantee rests on the SELECT and the INSERT in /check
-    // running without an interleaving point: `SqlStorage.exec` is synchronous
-    // and there is no `await` between them, so a concurrent request cannot
-    // observe the gap. That is an undocumented runtime property, and nothing
-    // asserted it — if it ever stopped holding, every impression would be
-    // counted twice with the suite still green.
+    // The dedup guarantee rests on the SELECT and the INSERT in /check running
+    // without an interleaving point. This catches an `await` introduced between
+    // them, but it cannot catch the runtime half of the property: `fakeSql.exec`
+    // is synchronous by construction, so it holds regardless of what
+    // `SqlStorage.exec` does. That half is asserted against real `workerd` in
+    // test/workers/dedup.workers.test.ts.
     const { do: store } = makeStore();
     const results = await Promise.all(
       Array.from({ length: 25 }, () =>

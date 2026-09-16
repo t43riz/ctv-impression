@@ -204,6 +204,7 @@ export async function extractImpression(
       creativeId,
       ifaHash,
       ifaPresent: ifaUsable,
+      lmt,
       appId,
       country,
       ifaType,
@@ -265,7 +266,12 @@ export async function nonAttributableDedupKey(
   // made every rotation silently reset the frequency cap on exactly the
   // LMT/child-directed traffic that has no other cap — this key class has no
   // previous-salt alias, so there is nothing to carry the old bucket across.
-  const pepper = env.IP_CAP_SALT?.trim() || env.IFA_HASH_SALT;
+  // A placeholder value is ignored rather than used, matching how every other
+  // secret is treated: the shipped `.dev.vars.example` default would otherwise
+  // become a live pepper on any deploy that set it without rotating.
+  const configured = env.IP_CAP_SALT?.trim();
+  const pepper =
+    configured && !isPlaceholderSecret(configured) ? configured : env.IFA_HASH_SALT;
   const h = await hashIfa(pepper, `ip:${ip}:${hourBucket}`);
   return `${h}|${imp.campaignId}|${imp.creativeId}`;
 }

@@ -7,8 +7,10 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test/workers/tsconfig.json",
+    "test": "vitest run && vitest run --config vitest.workers.config.ts",
+    "test:node": "vitest run",
+    "test:workers": "vitest run --config vitest.workers.config.ts",
     "test:watch": "vitest",
     "sign": "node scripts/sign-url.mjs"
   },

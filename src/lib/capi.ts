@@ -105,19 +105,31 @@ export async function buildCapiPayload(
   const user: CapiUserData = { is_hashed: true, ph: phHash };
 
   // LMT is a privacy signal and is honored whether or not the match gates
-  // device identifiers in.
+  // device identifiers in. It reflects a real opt-out (or a child-directed
+  // campaign), never merely an unreadable identifier — reporting `opt_out` for
+  // a device that opted out of nothing would misstate a user's choice.
   const lmt = match.matched && match.best?.lmt === true;
   const optOut: "true" | "false" = lmt ? "true" : "false";
 
   // An LMT device is never device-matched (docs/PRIVACY.md §2.1), so its IP is
   // withheld along with its RIDA: only the hashed phone and coarse geo remain.
   if (match.matched && match.best && match.deviceIds && !lmt) {
-    user.client_ip_address = match.best.ip;
+    // Each field is written only when actually present. The stored record
+    // withholds ip/rida for any unusable identifier, not just an opt-out (an
+    // unexpanded macro, a zeroed IFA, an unusable salt), so this branch is
+    // reachable with them empty and must not emit empty identifier fields.
+    if (match.best.ip) user.client_ip_address = match.best.ip;
     if (match.best.rida) {
       user.aRI = match.best.rida; // omitted under LMT (rida === "")
     }
     if (match.best.region) user.st = match.best.region;
     if (match.best.postal) user.zp = match.best.postal;
+    // Fall back to the area-code state when the record carried no geo, so a
+    // non-attributable match is not strictly worse than the phone-only path.
+    if (!user.st) {
+      const st = areaCodeToState(call.ani);
+      if (st) user.st = st;
+    }
   } else {
     // Phone-only path: zero match, or a match too weak to justify sending a
     // best-guess device identifier. Attribute via hashed phone + coarse geo.

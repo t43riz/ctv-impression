@@ -319,6 +319,33 @@ describe("pixel ingest", () => {
     expect(recorded[0].lmt).toBe(0);
   });
 
+  it("does not mark a consenting device as opted out when its IFA is unusable", async () => {
+    // An unexpanded macro leaves the identifier unusable, but the device opted
+    // out of nothing. `lmt` becomes `opt_out` on the conversion payload, so
+    // deriving it from identifier availability reports a fabricated opt-out to
+    // the platform — a false statement about a user's choice under a signed
+    // data agreement — and needlessly suppresses attribution.
+    const h = makeHarness();
+    await beacon(h.env, { ...baseParams, ifa: "[[[RIDA]]]", lmt: "0" });
+
+    const recorded = h.recentRows("cre1");
+    expect(recorded).toHaveLength(1);
+    // Identifiers are still withheld: the IFA is genuinely unusable.
+    expect(recorded[0].ip).toBe("");
+    expect(recorded[0].rida).toBe("");
+    // But the device is not reported as having opted out.
+    expect(recorded[0].lmt).toBe(0);
+  });
+
+  it("marks a child-directed impression as opted out", async () => {
+    // COPPA treatment is a real opt-out signal, unlike an unreadable IFA.
+    const h = makeHarness();
+    h.campaigns.map.set("campaign:kids", "child_directed");
+    await beacon(h.env, { ...baseParams, campaign_id: "kids", lmt: "0" });
+
+    expect(h.recentRows("cre1")[0].lmt).toBe(1);
+  });
+
   it("rejects a beacon for a campaign that is not allowlisted", async () => {
     const h = makeHarness();
     await beacon(h.env, { ...baseParams, campaign_id: "unknown-camp" });
@@ -592,6 +619,74 @@ describe("scheduled jobs", () => {
     // The check itself succeeded, so this row is attributable to the write.
     expect(recorded).not.toContain("alert_health_check_failed");
     expect(recorded).toContain("alert_health_write_failed");
+  });
+
+  it("pushes a red health result to the alert webhook", async () => {
+    // The R2 artifact is a record, not a notification: nothing reads it on a
+    // schedule. This is the only path that reaches a human.
+    const posted: { url: string; body: unknown }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        posted.push({ url, body: JSON.parse(String(init?.body)) });
+        return new Response("ok", { status: 200 });
+      }),
+    );
+    // No ACCOUNT_ID, so the health check fails and the artifact goes red.
+    const h = makeHarness({ ALERT_WEBHOOK_URL: "https://hooks.example.com/abc" });
+
+    await run(h.env, "30 3 * * *");
+
+    expect(posted).toHaveLength(1);
+    expect(posted[0].url).toBe("https://hooks.example.com/abc");
+    const body = posted[0].body as { text: string; health: { healthy: boolean } };
+    expect(body.text).toContain("health check FAILED");
+    expect(body.health.healthy).toBe(false);
+  });
+
+  it("does not call the webhook when the health check is green", async () => {
+    // An alert on every run is an alert on none of them.
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        calls.push(String(url));
+        // The Analytics SQL read the health check performs, and the export
+        // freshness marker: both healthy.
+        return new Response(JSON.stringify({ meta: [], data: [], rows: 0 }), { status: 200 });
+      }),
+    );
+    const h = makeHarness({
+      ACCOUNT_ID: "acct-123",
+      CF_API_TOKEN: "sql-read-token",
+      ALERT_WEBHOOK_URL: "https://hooks.example.com/abc",
+    });
+    // Export freshness reads a marker from R2; seed today's so it is fresh.
+    await h.archive.put(
+      "_status/last_export.json",
+      JSON.stringify({ date: new Date(Date.now() - 86_400_000).toISOString().slice(0, 10), ts: new Date().toISOString() }),
+    );
+
+    await run(h.env, "30 3 * * *");
+
+    expect(calls).not.toContain("https://hooks.example.com/abc");
+  });
+
+  it("records an alert when the webhook itself fails", async () => {
+    // A notifier that fails silently is worse than none: it implies delivery.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        String(url).startsWith("https://hooks.")
+          ? new Response("nope", { status: 500 })
+          : new Response(JSON.stringify({ meta: [], data: [], rows: 0 }), { status: 200 }),
+      ),
+    );
+    const h = makeHarness({ ALERT_WEBHOOK_URL: "https://hooks.example.com/abc" });
+
+    await run(h.env, "30 3 * * *");
+
+    expect(outcomes(h.recon)).toContain("alert_notify_failed");
   });
 });
 

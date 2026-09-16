@@ -85,7 +85,10 @@ crons = ["0 2 * * *", "30 3 * * *"]
 #   CALL_HMAC_KEY, CAPI_API_KEY, ADMIN_TOKEN
 # Optional secrets:
 #   IFA_HASH_SALT_PREV (during a salt-rotation window)
+#   IP_CAP_SALT        (pepper for the coarse IP+hour frequency cap)
 #   UA_CAPI_API_KEY    (Universal Ads CAPI, once provisioned)
+#   ALERT_WEBHOOK_URL  (POSTed when the nightly health check is red; the URL is
+#                       itself the credential for most incident tools)
 # ---------------------------------------------------------------------------
 [vars]
 DEDUP_WINDOW_HOURS = "24"

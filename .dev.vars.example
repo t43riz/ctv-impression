@@ -33,3 +33,9 @@ ADMIN_TOKEN="3333333333333333333333333333333333333333333333333333333333333333"
 # Universal Ads CAPI bearer token [CONFIRM WITH UA]. Leave blank while
 # UA_CAPI_ENDPOINT is unset / UA_CAPI_MODE=test.
 UA_CAPI_API_KEY=""
+
+# Endpoint POSTed when the nightly health check comes back red. Unset by
+# default, in which case the result is only written to _status/health.json and
+# nothing pushes it. Treat as a secret: for Slack and most incident tools the
+# URL is itself the credential.
+# ALERT_WEBHOOK_URL=""

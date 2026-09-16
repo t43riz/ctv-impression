@@ -66,7 +66,10 @@ export async function buildUaCapiPayload(
   // advertising ID are withheld together: only the hashed phone and coarse geo
   // remain.
   if (match.matched && match.best && match.deviceIds && !lmt) {
-    user.client_ip_address = match.best.ip;
+    // Written only when present: the record withholds ip/rida for any unusable
+    // identifier, not only for an opt-out, so this branch is reachable with
+    // them empty.
+    if (match.best.ip) user.client_ip_address = match.best.ip;
     if (match.best.rida) user.ifa = match.best.rida; // "" under LMT
     if (match.best.hhId) user.household_id = match.best.hhId;
     if (match.best.region) user.st = match.best.region;

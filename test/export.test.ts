@@ -65,6 +65,14 @@ describe("buildQuery", () => {
     expect(sql).toContain("+ INTERVAL '1' DAY");
   });
 
+  it("refuses a date that is not a safe SQL literal", () => {
+    // The date is gated by DATE_RE on the admin path and derived from
+    // scheduledTime on the cron path, so this is defence in depth — but it was
+    // the last raw interpolation of an externally-reachable string into WAE
+    // SQL, and the guard should not depend on every future caller remembering.
+    expect(() => buildQuery("2026-09-14' OR '1'='1", 0, 10)).toThrow();
+  });
+
   it("weights counts by _sample_interval, never double0", () => {
     const sql = buildQuery("2026-09-14", 0, 10);
     expect(sql).toContain("sum(_sample_interval) AS impressions");

@@ -68,6 +68,15 @@ Health ceilings are configurable too, each as a fraction of traffic
 `HEALTH_MAX_CALL_ERROR_RATIO` `0.5`, `HEALTH_MAX_CALL_REJECT_RATIO` `0.5`); an
 unset, blank or out-of-range value falls back to the default.
 
+Scheduled-job failures are gated on an **absolute count**, not a ratio: they
+fire at most once per cron run, so against a day of healthy beacon traffic any
+ratio rounds to ~0 and clears every ceiling. A single `alert_export_failed`,
+`alert_health_check_failed`, `alert_health_write_failed`,
+`alert_claim_release_failed` or `alert_admin_error` turns the check red.
+
+Set `ALERT_WEBHOOK_URL` (a secret — for most incident tools the URL *is* the
+credential) to have a red nightly health check POSTed somewhere a human reads.
+
 An unexpanded ad-server macro (`[[[RIDA]]]`, `[IFA]`) is treated as a **missing**
 identifier, never as a device id — hashing it would collapse every affected
 beacon into one pseudo-device and silently discard the rest as duplicates.
@@ -211,11 +220,35 @@ that failure cannot be reported inside the artifact it failed to write.
 ## Develop / test / deploy
 
 ```bash
-npm run typecheck
-npm test
+npm run typecheck    # both tsconfigs (the workerd specs need the pool's types)
+npm test             # Node suite, then the workerd suite
 npm run dev
 npm run deploy
 ```
+
+Tests run in two pools, because they answer different questions:
+
+| Command | Runtime | What it can prove |
+|---|---|---|
+| `npm run test:node` | Node + fakes | Application logic, exhaustively and fast |
+| `npm run test:workers` | real `workerd` | Durable Object semantics the fakes assume |
+
+The Node suite runs against hand-written fakes (`test/helpers/fakes.ts`). They
+are deliberately strict — `fakeSql` throws on an unrecognised statement,
+`fakeR2` withholds `customMetadata` unless `include` asks for it — but they are
+still a *model* of the runtime.
+
+The `workerd` suite exists for the assertions that model cannot make. The dedup
+guarantee rests on `SqlStorage.exec` not yielding between the SELECT and the
+INSERT in `DedupStore`; `fakeSql.exec` is an ordinary synchronous function, so
+it satisfies that property by construction no matter what the real runtime does.
+`test/workers/dedup.workers.test.ts` binds the assertion to the runtime that
+actually enforces it, and covers real SQLite `LIKE`/`ESCAPE` for the DSAR erase.
+
+> The pool requires the `nodejs_compat` flag, which the deployed Worker does not
+> use, so `vitest.workers.config.ts` declares its bindings directly instead of
+> reading `wrangler.toml`. Adding the flag to `wrangler.toml` to satisfy a test
+> runner would change the production runtime.
 
 ## Key corrections from the original spec
 
@@ -300,18 +333,54 @@ npm run deploy
 - `MATCH_WINDOW_MINUTES` changes are tracked by the matching store. It purges
   against the **stored** window, so persisting only the first value ever seen
   let a lowered window leave raw IP/RIDA retained on the old, longer one.
+- **LMT is carried separately from identifier availability.** `ifaPresent` is
+  false for four different reasons (opt-out, COPPA, an unexpanded macro, an
+  unusable salt) but only the first two are a *choice*. That flag becomes
+  `opt_out` on the conversion payload, so deriving it from `ifaPresent` reported
+  a fabricated opt-out to the platform for a device that opted out of nothing,
+  and suppressed attribution nobody declined.
+- **`/admin/*` has an error boundary.** The report routes reach the Analytics
+  SQL API; without it a network failure escaped as a bare runtime 500 with no
+  ledger row, and the upstream error detail (which can quote the account id)
+  risked reaching the caller. It now answers a flat `internal_error` and records
+  `alert_admin_error`.
+- **A failed `/call` claim release is recorded, not just logged.** A stranded
+  claim makes the PBX's retry answer `duplicate`, and `call_duplicate` is
+  deliberately never gated — so the lost conversion used to come to rest in the
+  one bucket that cannot alarm.
+- **Retryable `/call` faults carry `Retry-After`.** `internal_error` is now
+  `503` rather than `502`: the fault may be ours, and `502` asserts an upstream
+  answered badly. The contract travels in the response instead of relying on the
+  PBX having read the docs.
+- **DSAR partial scope is a `200` with `scope_complete: false`.** `206` is
+  defined for range responses and is expected to carry `Content-Range`, so
+  proxies and generated clients may treat it as a truncated body. The campaign
+  bound (200) now applies to the enumerated path too, which is the default.
 
 ## Known follow-on work
 
-- **Durable Object re-sharding.** `DEDUP` routes by `campaignId` and `RECENT` by
-  `creativeId`, so one campaign's burst funnels through a single-threaded
-  instance. Re-sharding by a hash-prefixed key is the fix, but it strands
-  existing rows on the old instances: dedup state is what prevents
-  double-counting, and stranded `RECENT` rows hold raw IP/RIDA on instances
-  whose purge alarm will never fire again. It needs a planned migration window,
-  not an in-place change.
+- **Durable Object re-sharding.** Three shard keys, and they are not equally
+  hard to change:
+  - `DEDUP` on the **beacon** path routes by `campaignId`, and `RECENT` routes
+    by `creativeId`, so one campaign's burst funnels through a single-threaded
+    instance. Re-sharding by a hash-prefixed key is the fix, but it strands
+    existing rows: dedup state is what prevents double-counting, and stranded
+    `RECENT` rows hold raw IP/RIDA on instances whose purge alarm will never
+    fire again. Needs a planned migration window, not an in-place change.
+  - `DEDUP` on the **conversion** path routes by the constant `"calls"`
+    (`src/call.ts`), so *every* `/call` in the system serialises through a
+    single instance. That is the tighter ceiling of the two. It is also the
+    cheaper one to fix: call claims expire after `CALL_DEDUP_HOURS` (48h), so a
+    dual-read window retires the old shard without stranding anything
+    permanently.
+
+  Neither is a correctness problem at pilot volume; both are throughput
+  ceilings, and the conversion-path one will bind first.
 - **CI, lint and environment separation.** No `.github/` workflow, no lint
   config, and a single unnamed `wrangler.toml` environment pointed at the
-  production custom domain.
-- **Alert delivery.** `_status/health.json` is written but nothing reads it; the
-  ledger signal does not yet reach a human.
+  production custom domain — so `wrangler deploy` from any working tree goes
+  straight to the live custom domain.
+- **Alert delivery is opt-in.** Setting `ALERT_WEBHOOK_URL` POSTs a red nightly
+  health result to an endpoint of your choice. Left unset, the result is only
+  written to `_status/health.json`, which nothing reads on a schedule — so the
+  ledger signal stops at a file.

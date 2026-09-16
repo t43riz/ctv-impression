@@ -24,6 +24,7 @@ const imp: Impression = {
   creativeId: "cre",
   ifaHash: TARGET_HASH,
   ifaPresent: true,
+  lmt: false,
   appId: "app",
   country: "US",
   ifaType: "rida",

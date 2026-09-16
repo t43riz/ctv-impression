@@ -146,14 +146,29 @@ caller-supplied list.
 4. `RecentImpressions` self-purges within the attribution window; AE rows
    expire in 3 months (hash only); aggregates hold no identifiers.
 
-**Scope reporting.** A response with `scope_complete: false` (HTTP **206**) means
-the scan did not provably cover every shard: either `campaigns` was supplied by
-the caller and cannot be verified exhaustive, or the allowlist listing was
-truncated. Only the full-enumeration path returns `200` with
-`scope_complete: true`. Supplying more than 200 campaigns is refused with
-`400 {"error":"too_many_campaigns"}` — each one costs a Durable Object round
-trip ahead of the raw-tier scan, and a list that large cannot finish inside one
-request.
+**Scope reporting.** Read `scope_complete`, not the status code. A successful
+erasure is always `200`; `scope_complete: false` means the scan did not provably
+cover every shard — either `campaigns` was supplied by the caller and cannot be
+verified exhaustive, or the allowlist listing was truncated. **Never record a
+`scope_complete: false` response as a fulfilled request.**
+
+(Earlier builds returned `206` for this. That status is defined for range
+responses and is expected to carry `Content-Range`, so proxies and generated
+clients are entitled to treat it as a truncated body. The field is the contract.)
+
+**Campaign bound.** One DSAR erases across at most **200** campaigns, whether
+the list was supplied or enumerated: each costs a Durable Object round trip (two
+during a salt rotation) ahead of the raw-tier scan, against a 1000-subrequest
+ceiling per request. Supplying more is refused with
+`400 {"error":"too_many_campaigns"}`. If the allowlist itself exceeds 200, the
+response is `scope_complete: false` and the erasure must be completed by running
+the request again with explicit `campaigns` batches.
+
+**Partial failures.** If the dedup tier stops responding part-way, the response
+is `500 {"error":"dedup_erase_failed"}` with `dedup_deleted`,
+`campaigns_scanned` and `campaigns_planned` so a re-run is informed. The raw
+tier fails the same way with `raw_erase_failed`. Both mean the request is **not**
+complete.
 
 `RAW_RETENTION_DAYS` must be at least the raw bucket's lifecycle rule, otherwise
 objects written outside the scanned window would be missed.

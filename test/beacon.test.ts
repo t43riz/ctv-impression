@@ -224,7 +224,7 @@ describe("dedupKey", () => {
     expect(
       dedupKey({
         advertiserId: "a", campaignId: "c", creativeId: "cr",
-        ifaHash: "anon", ifaPresent: false, appId: "app", country: "US",
+        ifaHash: "anon", ifaPresent: false, lmt: true, appId: "app", country: "US",
         ifaType: "", platform: "roku",
       }),
     ).toBeNull();
@@ -233,7 +233,7 @@ describe("dedupKey", () => {
   it("builds a key from ifaHash without raw identifiers", () => {
     const k = dedupKey({
       advertiserId: "a", campaignId: "c", creativeId: "cr",
-      ifaHash: "abc123", ifaPresent: true, appId: "app", country: "US",
+      ifaHash: "abc123", ifaPresent: true, lmt: false, appId: "app", country: "US",
       ifaType: "", platform: "roku",
     });
     expect(k).toBe("abc123|c|cr");
@@ -385,7 +385,7 @@ describe("ifa_type reporting", () => {
 describe("nonAttributableDedupKey", () => {
   const imp: Impression = {
     advertiserId: "a", campaignId: "c", creativeId: "cr",
-    ifaHash: "anon", ifaPresent: false, appId: "app", country: "US",
+    ifaHash: "anon", ifaPresent: false, lmt: true, appId: "app", country: "US",
     ifaType: "", platform: "roku",
   };
 
@@ -414,5 +414,32 @@ describe("nonAttributableDedupKey", () => {
     const attributable = await hashIfa(env.IFA_HASH_SALT, "203.0.113.9");
     const nonAttr = await nonAttributableDedupKey(env, imp, "203.0.113.9", 10_000, true);
     expect(nonAttr).not.toBe(`${attributable}|c|cr`);
+  });
+
+  it("ignores a placeholder IP_CAP_SALT rather than pepper with it", async () => {
+    // Every other secret refuses its shipped placeholder. This one silently
+    // accepted it, so a deploy that set the example value got a pepper that is
+    // public knowledge — and the fallback it was meant to improve on is safer.
+    const placeholder = "3".repeat(64);
+    const withPlaceholder = makeEnv(["c"]);
+    (withPlaceholder as { IP_CAP_SALT?: string }).IP_CAP_SALT = placeholder;
+    const fallback = makeEnv(["c"]);
+
+    expect(
+      await nonAttributableDedupKey(withPlaceholder, imp, "203.0.113.9", 10_000, true),
+    ).toBe(await nonAttributableDedupKey(fallback, imp, "203.0.113.9", 10_000, true));
+  });
+
+  it("uses a real IP_CAP_SALT so rotating IFA_HASH_SALT leaves the cap intact", async () => {
+    const dedicated = makeEnv(["c"]);
+    (dedicated as { IP_CAP_SALT?: string }).IP_CAP_SALT = "a-real-dedicated-ip-cap-salt";
+    const rotated = makeEnv(["c"]);
+    (rotated as { IP_CAP_SALT?: string }).IP_CAP_SALT = "a-real-dedicated-ip-cap-salt";
+    (rotated as { IFA_HASH_SALT: string }).IFA_HASH_SALT = "rotated-ifa-salt";
+
+    // The IFA salt rotated; the frequency-cap bucket must not move with it.
+    expect(await nonAttributableDedupKey(rotated, imp, "203.0.113.9", 10_000, true)).toBe(
+      await nonAttributableDedupKey(dedicated, imp, "203.0.113.9", 10_000, true),
+    );
   });
 });

@@ -1,5 +1,5 @@
 import type { Env } from "./types";
-import { querySql } from "./lib/sql";
+import { querySql, sqlString, sqlNumber } from "./lib/sql";
 
 /**
  * Daily export Worker (Cron trigger).
@@ -57,11 +57,11 @@ export function buildQuery(date: string, offset: number, limit: number): string 
       blob9 AS platform,
       sum(_sample_interval) AS impressions
     FROM ${DATASET}
-    WHERE timestamp >= toDateTime('${date} 00:00:00')
-      AND timestamp <  toDateTime('${date} 00:00:00') + INTERVAL '1' DAY
+    WHERE timestamp >= toDateTime(${sqlString(`${date} 00:00:00`)})
+      AND timestamp <  toDateTime(${sqlString(`${date} 00:00:00`)}) + INTERVAL '1' DAY
     GROUP BY hour, campaign_id, creative_id, country, app_id, advertiser_id, ifa_present, platform
     ORDER BY hour, campaign_id, creative_id, country, app_id, advertiser_id, ifa_present, platform
-    LIMIT ${limit} OFFSET ${offset}
+    LIMIT ${sqlNumber(limit)} OFFSET ${sqlNumber(offset)}
     FORMAT JSON`;
 }
 

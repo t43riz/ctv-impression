@@ -130,6 +130,13 @@ const INFRA_ALERTS = [
   "alert_health_check_failed",
   // R2 refused the health artifact itself, so the only remaining signal is here.
   "alert_health_write_failed",
+  // A /call claim that could not be released. The PBX's retry will be answered
+  // "duplicate" and the conversion lost, and `call_duplicate` is deliberately
+  // never gated — so this row is the only thing standing between a stranded
+  // claim and silent revenue loss. Never proportional to beacon volume.
+  "alert_claim_release_failed",
+  // The admin surface threw. Rare by nature, and a DSAR erasure runs there.
+  "alert_admin_error",
 ] as const;
 
 /**

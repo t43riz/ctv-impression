@@ -8,6 +8,7 @@ import {
   fakeKv,
   fakeR2,
   fakeAnalytics,
+  type FakeAnalytics,
   type RecordedFetch,
 } from "./helpers/fakes";
 
@@ -75,6 +76,53 @@ const authed = (path: string, init: RequestInit = {}) =>
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("admin error boundary", () => {
+  it("records an outcome when a report route throws instead of a bare 500", async () => {
+    // The report routes reach the Analytics SQL API over the network. Without a
+    // boundary that failure escapes to the runtime as an unhandled 500 with no
+    // ledger row — the same defect the /call path was fixed for.
+    const { env } = makeEnv();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("analytics sql unreachable");
+      }),
+    );
+
+    const res = await handleAdmin(authed("/admin/report/campaigns"), env);
+
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "internal_error" });
+    const recorded = (env.RECON as unknown as FakeAnalytics).points.map(
+      (p) => p.blobs?.[0] ?? "",
+    );
+    expect(recorded).toContain("alert_admin_error");
+  });
+
+  it("does not leak the upstream error detail to the caller", async () => {
+    // AnalyticsSqlError quotes the upstream response, which can carry the
+    // account id and the query. That belongs in the log, not the response.
+    const { env } = makeEnv();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("acct-123 token=sql-read-token rejected");
+      }),
+    );
+
+    const res = await handleAdmin(authed("/admin/report/campaigns"), env);
+
+    expect(JSON.stringify(await res.json())).not.toContain("sql-read-token");
+  });
+
+  it("keeps the surface hidden when an unauthenticated request throws", async () => {
+    // The boundary must not turn a 404 into a 500 and confirm the route exists.
+    const { env } = makeEnv();
+    const res = await handleAdmin(req("/admin/report/campaigns"), env);
+    expect(res.status).toBe(404);
+  });
 });
 
 describe("admin auth", () => {
@@ -347,31 +395,58 @@ describe("admin DSAR", () => {
 
   it("reports a caller-narrowed erasure as incomplete rather than certifying it", async () => {
     // A supplied list cannot be verified exhaustive, so the response must not
-    // read as a clean success the way the full-enumeration path does.
+    // read as a clean success the way the full-enumeration path does. The
+    // signal is the body field, not the status: the erase itself succeeded.
     const { env } = makeEnv();
     const res = await handleAdmin(dsar({ ifa: "dev-1", campaigns: ["camp"] }), env);
     const body = (await res.json()) as { scope_complete: boolean; note: string };
 
-    expect(res.status).toBe(206);
+    expect(res.status).toBe(200);
     expect(body.scope_complete).toBe(false);
     expect(body.note).toContain("MAY BE INCOMPLETE");
   });
 
   it("reports a truncated campaign listing as an incomplete scope", async () => {
-    // A listing cut short means the shard set is not provably complete.
-    const campaigns = fakeKv(
-      { "campaign:a": "active", "campaign:b": "active", "campaign:c": "active" },
-      1,
+    // A listing cut short means the shard set is not provably complete, so the
+    // erasure must not be certified. The walk is bounded at
+    // MAX_DSAR_CAMPAIGN_PAGES (20) x DSAR_CAMPAIGN_PAGE_SIZE (10) = 200, so 201
+    // campaigns is the first count that leaves a live cursor outstanding.
+    const seeded = Object.fromEntries(
+      Array.from({ length: 201 }, (_, i) => [`campaign:c${String(i).padStart(3, "0")}`, "active"]),
     );
-    const { env } = makeEnv({ CAMPAIGNS: campaigns });
-    // Force truncation by capping the walk below the number of pages needed.
+    const { env } = makeEnv({ CAMPAIGNS: fakeKv(seeded) });
+
+    const res = await handleAdmin(dsar({ ifa: "dev-1" }), env);
+    const body = (await res.json()) as {
+      scope_complete: boolean;
+      campaigns_scanned: number;
+      note: string;
+    };
+
+    expect(res.status).toBe(200);
+    expect(body.scope_complete).toBe(false);
+    // Only what the walk actually reached, not the 201 that exist. This is also
+    // the subrequest bound: 200 campaigns is the most one DSAR will erase.
+    expect(body.campaigns_scanned).toBe(200);
+    expect(body.note).toContain("MAY BE INCOMPLETE");
+  });
+
+  it("completes the scope when the listing finishes inside the page budget", async () => {
+    // Control for the test above: multi-page paging that finishes must still
+    // certify. Without it, a walk capped at zero pages would satisfy the
+    // truncation assertion while breaking every real erasure.
+    const seeded = Object.fromEntries(
+      Array.from({ length: 25 }, (_, i) => [`campaign:c${String(i).padStart(3, "0")}`, "active"]),
+    );
+    const { env } = makeEnv({ CAMPAIGNS: fakeKv(seeded) });
+
     const res = await handleAdmin(dsar({ ifa: "dev-1" }), env);
     const body = (await res.json()) as { scope_complete: boolean; campaigns_scanned: number };
 
-    // Three keys at one key per page still completes within the page budget.
-    expect(body.scope_complete).toBe(true);
-    expect(body.campaigns_scanned).toBe(3);
     expect(res.status).toBe(200);
+    expect(body.scope_complete).toBe(true);
+    // Three pages of ten, so the cursor was followed rather than one page read.
+    expect(body.campaigns_scanned).toBe(25);
   });
 
   it("refuses when no campaign can be enumerated and none was supplied", async () => {

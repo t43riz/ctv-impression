@@ -204,7 +204,7 @@ describe("handleCall error boundary", () => {
     });
     const res = await handleCall(await h.request(), h.env);
 
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(503);
     expect(await statusOf(res)).toBe("internal_error");
     expect(callOutcomes(h.recon)).toEqual(["call_internal_error"]);
   });
@@ -217,8 +217,15 @@ describe("handleCall error boundary", () => {
     });
     const res = await handleCall(await h.request(), h.env);
 
-    expect(res.status).toBe(502);
-    expect(callOutcomes(h.recon)).toEqual(["call_internal_error"]);
+    expect(res.status).toBe(503);
+    // The claim was captured before it was attempted, so the boundary tries to
+    // release it — against the same dead Durable Object. That second failure is
+    // recorded rather than swallowed: a stranded claim answers the PBX's retry
+    // "duplicate", and `call_duplicate` is never gated.
+    expect(callOutcomes(h.recon)).toEqual([
+      "call_internal_error",
+      "alert_claim_release_failed",
+    ]);
   });
 
   it("releases a claim that was taken when the claim response is unreadable", async () => {
@@ -240,7 +247,7 @@ describe("handleCall error boundary", () => {
 
     const res = await handleCall(await h.request(), h.env);
 
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(503);
     expect(callOutcomes(h.recon)).toEqual(["call_internal_error"]);
     expect(state.sql.seen.size).toBe(0);
   });
@@ -556,7 +563,10 @@ describe("handleCall idempotency", () => {
     });
 
     const first = await handleCall(await h.request(), h.env);
-    expect(first.status).toBe(502);
+    expect(first.status).toBe(503);
+    // The PBX must retry, so the contract travels in the response rather than
+    // only in the docs.
+    expect(first.headers.get("Retry-After")).toBe("30");
     expect(await statusOf(first)).toBe("internal_error");
     expect(h.seen.size).toBe(0);
 
@@ -575,7 +585,10 @@ describe("handleCall idempotency", () => {
     globalThis.fetch = async () => new Response("nope", { status: 400 });
     try {
       const res = await handleCall(await h.request(), h.env);
+      // Still 502: the conversion API is a genuine upstream that answered
+      // badly. It carries Retry-After because the claim was released.
       expect(res.status).toBe(502);
+      expect(res.headers.get("Retry-After")).toBe("30");
       expect(await statusOf(res)).toBe("capi_error");
       expect(h.seen.size).toBe(0);
     } finally {

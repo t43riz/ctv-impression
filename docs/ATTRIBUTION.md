@@ -226,14 +226,21 @@ return `{"status":"not_qualified"}` and do not fire.
 placeholder `event_group_id`) | `not_qualified` | `duplicate` | `unauthorized` |
 `stale_timestamp` | `unknown_number` | `bad_fields` | `bad_json` |
 `not_configured` (placeholder `CALL_HMAC_KEY`) | `payload_too_large` |
-`rate_limited` (HTTP 429) | `capi_error` (HTTP 502).
+`rate_limited` (HTTP 429) | `capi_error` (HTTP 502) |
+`internal_error` (HTTP 503).
 
-**Two statuses are safe for the PBX to retry, and it must retry both:**
-`capi_error` (502) and `rate_limited` (429). A 429 means the per-IP budget
-(`CALL_RATE_LIMIT_PER_MINUTE`, default 60/min) was exceeded, and it is answered
-*before* the signature is checked, so the conversion has not been sent and has
-not been claimed. Treating it as final silently drops billable conversions. Any
-retry of `fired` or `duplicate` is idempotent by `callId`.
+**Three statuses are safe for the PBX to retry, and it must retry all three:**
+
+| Status | Code | Why it is retryable |
+|---|---|---|
+| `rate_limited` | 429 | Per-IP budget (`CALL_RATE_LIMIT_PER_MINUTE`, default 60/min) exceeded. Answered *before* the signature is checked, so nothing was sent or claimed. |
+| `capi_error` | 502 | The conversion API rejected the send. The idempotency claim is released first, so a retry runs the send again. |
+| `internal_error` | 503 | A dependency (KV, Durable Object, matching store) failed. Any claim taken is released before responding. |
+
+`502` and `503` both carry **`Retry-After: 30`**. The distinction is deliberate:
+`502` means a genuine upstream answered badly, `503` means the fault may be
+ours. A PBX that treats any of the three as final silently drops billable
+conversions. Any retry of `fired` or `duplicate` is idempotent by `callId`.
 
 `skipped` means **nothing was sent**, and the claim is released so the PBX's
 next attempt runs again once the configuration is fixed — a deployment that
@@ -307,11 +314,16 @@ wrangler kv key put --binding NUMBERS "number:18005550100" \
 5. Reconcile conversion volume vs. qualified-call volume.
 6. Confirm the PBX's peak calls per minute and set
    `CALL_RATE_LIMIT_PER_MINUTE` above it, then confirm with the PBX team that it
-   retries a **429** as well as a **502**. A throttled call is not sent and not
-   claimed, so a PBX that treats 429 as final loses the conversion silently.
+   retries **429**, **502** and **503**, honouring `Retry-After` on the last
+   two. None of the three sent or claimed the conversion, so a PBX that treats
+   any of them as final loses it silently.
 7. Confirm the registry entries in `NUMBERS` pass validation: `creativeId`,
    `campaignId`, `advertiserId` and `eventGroupId` must match
    `^[A-Za-z0-9_-]{1,64}$`, `platform` must be `roku` or `ua`, and
    `qualifySeconds` must be a number in `0..86400`. A malformed entry is
    answered `bad_number_mapping` (500) rather than silently defaulting.
-8. Set `IP_CAP_SALT` and keep it stable across `IFA_HASH_SALT` rotations.
+8. Set `IP_CAP_SALT` and keep it stable across `IFA_HASH_SALT` rotations. A
+   placeholder value is ignored, falling back to `IFA_HASH_SALT`.
+9. Set `ALERT_WEBHOOK_URL` so a red nightly health check reaches a human.
+   Without it the result is only written to `_status/health.json`, which nothing
+   reads on a schedule.

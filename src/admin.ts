@@ -11,6 +11,7 @@ import { hashIfa, isPlaceholderSecret } from "./lib/crypto";
 import { configInt } from "./lib/http";
 import { eraseByHash } from "./dedup";
 import { eraseRawByHash } from "./raw";
+import { recordRecon } from "./lib/recon";
 
 /**
  * /admin/* — token-protected operational surface (SPEC §7.1, PRIVACY §4).
@@ -65,13 +66,20 @@ const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_DSAR_CAMPAIGN_PAGES = 20;
 
 /**
- * Safety bound on a caller-supplied campaign narrowing. Each campaign costs one
+ * Safety bound on the campaigns a single DSAR will erase across, whether the
+ * list came from the caller or from enumeration. Each campaign costs one
  * Durable Object round trip (two during a salt rotation) before the raw-tier
- * scan even starts, and the request has a wall-clock budget; an unbounded list
- * runs out mid-erase and leaves an unhandled 500 with no record of what was
- * already deleted.
+ * scan even starts, and a Worker request is capped at 1000 subrequests; an
+ * unbounded list runs out mid-erase.
+ *
+ * Applied to the merged list rather than only to the caller's: the enumerated
+ * path is the default (omit `campaigns`), so bounding only the narrowing left
+ * the common case unprotected.
  */
-const MAX_DSAR_REQUESTED_CAMPAIGNS = 200;
+const MAX_DSAR_CAMPAIGNS = 200;
+
+/** Keys per enumeration page. `MAX_DSAR_CAMPAIGNS / MAX_DSAR_CAMPAIGN_PAGES`. */
+const DSAR_CAMPAIGN_PAGE_SIZE = 10;
 
 /**
  * Enumerate allowlisted campaign ids from the CAMPAIGNS namespace.
@@ -84,7 +92,14 @@ async function listCampaigns(env: Env): Promise<{ ids: string[]; complete: boole
   let cursor: string | undefined;
 
   for (let page = 0; page < MAX_DSAR_CAMPAIGN_PAGES; page++) {
-    const res = await env.CAMPAIGNS.list({ prefix: "campaign:", cursor });
+    const res = await env.CAMPAIGNS.list({
+      prefix: "campaign:",
+      cursor,
+      // Bound the page explicitly: KV defaults to 1000 keys, so the 20-page
+      // walk could otherwise yield 20k campaigns and the erase loop below
+      // would exceed the Worker's subrequest ceiling mid-erase.
+      limit: DSAR_CAMPAIGN_PAGE_SIZE,
+    });
     for (const k of res.keys) {
       const id = k.name.slice("campaign:".length);
       if (ID_RE.test(id)) ids.push(id);
@@ -110,7 +125,28 @@ function clampParam(raw: string | null, fallback: number, min: number, max: numb
   return Math.min(Math.max(Math.floor(n), min), max);
 }
 
+/**
+ * Admin surface. Wrapped by an error boundary so a throwing dependency becomes
+ * a recorded outcome rather than a bare runtime 500 (see `handleAdminInner`).
+ */
 export async function handleAdmin(request: Request, env: Env): Promise<Response> {
+  try {
+    return await handleAdminInner(request, env);
+  } catch (err) {
+    // The report routes reach the Analytics SQL API, whose failures carry the
+    // upstream response body. That detail belongs in the log, never in the
+    // response: `AnalyticsSqlError` can quote a request that contains the
+    // account id, and the caller only needs to know the route failed.
+    console.log(
+      `admin_internal_error path=${new URL(request.url).pathname}`,
+      err instanceof Error ? err.stack ?? err.message : String(err),
+    );
+    recordRecon(env, "alert_admin_error", "unknown");
+    return json({ error: "internal_error" }, 500);
+  }
+}
+
+async function handleAdminInner(request: Request, env: Env): Promise<Response> {
   if (!(await tokenOk(env, request.headers.get("Authorization")))) {
     return notFound();
   }
@@ -198,12 +234,12 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
     if (body.campaigns !== undefined && !Array.isArray(body.campaigns)) {
       return json({ error: "campaigns must be an array of campaign ids" }, 400);
     }
-    if ((body.campaigns ?? []).length > MAX_DSAR_REQUESTED_CAMPAIGNS) {
+    if ((body.campaigns ?? []).length > MAX_DSAR_CAMPAIGNS) {
       return json(
         {
           error: "too_many_campaigns",
           note:
-            `At most ${MAX_DSAR_REQUESTED_CAMPAIGNS} campaigns may be supplied. ` +
+            `At most ${MAX_DSAR_CAMPAIGNS} campaigns may be supplied. ` +
             "Omit `campaigns` to erase across every allowlisted campaign.",
         },
         400,
@@ -220,8 +256,13 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
     );
     const enumerated = await listCampaigns(env);
     const campaigns = requested.length > 0 ? requested : enumerated.ids;
+    // The enumerated path cannot exceed the cap (the page walk is bounded to
+    // exactly it), so this only ever trims a pathological listing. Applied
+    // anyway: the bound that protects the subrequest budget should not depend
+    // on two constants staying in sync elsewhere in the file.
+    const capped = campaigns.slice(0, MAX_DSAR_CAMPAIGNS);
 
-    if (campaigns.length === 0) {
+    if (capped.length === 0) {
       return json(
         {
           error: "no_campaigns",
@@ -233,8 +274,10 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
       );
     }
 
-    // A truncated listing means the shard set is not provably complete.
-    const scopeComplete = requested.length > 0 ? false : enumerated.complete;
+    // Scope is only provable when the listing finished, the caller did not
+    // narrow it, and nothing was trimmed by the cap.
+    const scopeComplete =
+      requested.length === 0 && enumerated.complete && capped.length === campaigns.length;
 
     // Locate by hash (PRIVACY §4): current salt, plus previous during rotation.
     const hashes = [await hashIfa(env.IFA_HASH_SALT, ifa)];
@@ -245,7 +288,7 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
     let dedupDeleted = 0;
     let dedupCampaigns = 0;
     try {
-      for (const campaign of campaigns) {
+      for (const campaign of capped) {
         for (const h of hashes) {
           dedupDeleted += await eraseByHash(env.DEDUP, campaign, h);
         }
@@ -261,7 +304,7 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
           detail: err instanceof Error ? err.message : String(err),
           dedup_deleted: dedupDeleted,
           campaigns_scanned: dedupCampaigns,
-          campaigns_planned: campaigns.length,
+          campaigns_planned: capped.length,
           note:
             "Dedup erasure stopped part-way. THIS REQUEST IS NOT COMPLETE — do not " +
             "record it as fulfilled; re-run once the Durable Object responds.",
@@ -306,35 +349,38 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
       "re-run if raw_tier.truncated. Coarse IP-derived frequency-cap keys in " +
       "the dedup store are not IFA-addressable and expire with their TTL.";
 
-    // Partial scope is reported as 206, never as a clean 200: the raw tier
-    // already refuses to certify an unverifiable erase, and the dedup tier must
-    // not answer with more confidence than it has.
+    // Partial scope is carried by `scope_complete`, not by the status code.
+    // 206 is defined for range responses and is expected to carry
+    // `Content-Range` (RFC 9110 §15.3.7); intermediaries and generated clients
+    // are entitled to treat a 206 without it as a truncated body. The erasure
+    // succeeded either way, so the status stays 200 and the caller reads the
+    // field — which it must do regardless, since a complete-scope response can
+    // still report `raw_tier.truncated`.
     if (!scopeComplete) {
-      return json(
-        {
-          dedup_deleted: dedupDeleted,
-          raw_tier: raw,
-          campaigns_scanned: campaigns.length,
-          scope_complete: false,
-          note:
-            (requested.length > 0
-              ? "Erasure covered ONLY the campaigns supplied by the caller and the system " +
-                "cannot verify that list is exhaustive. Omit `campaigns` to erase across " +
-                "every allowlisted campaign. "
+      return json({
+        dedup_deleted: dedupDeleted,
+        raw_tier: raw,
+        campaigns_scanned: capped.length,
+        scope_complete: false,
+        note:
+          (requested.length > 0
+            ? "Erasure covered ONLY the campaigns supplied by the caller and the system " +
+              "cannot verify that list is exhaustive. Omit `campaigns` to erase across " +
+              "every allowlisted campaign. "
+            : capped.length < campaigns.length
+              ? `The campaign set was trimmed to the first ${MAX_DSAR_CAMPAIGNS}. `
               : "The CAMPAIGNS listing was truncated, so the campaign set is not provably " +
                 "complete. ") +
-            "THIS REQUEST MAY BE INCOMPLETE — verify scope before recording it as " +
-            "fulfilled. " +
-            baseNote,
-        },
-        206,
-      );
+          "THIS REQUEST MAY BE INCOMPLETE — verify scope before recording it as " +
+          "fulfilled. " +
+          baseNote,
+      });
     }
 
     return json({
       dedup_deleted: dedupDeleted,
       raw_tier: raw,
-      campaigns_scanned: campaigns.length,
+      campaigns_scanned: capped.length,
       scope_complete: true,
       note: baseNote,
     });

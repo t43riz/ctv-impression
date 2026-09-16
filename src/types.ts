@@ -95,6 +95,13 @@ export interface Env {
   HEALTH_MAX_ALERT_RATIO?: string; // default 0.01 alerts / received
   HEALTH_MAX_CALL_ERROR_RATIO?: string; // default 0.5  failed sends / calls
   HEALTH_MAX_CALL_REJECT_RATIO?: string; // default 0.5  refused calls / calls
+
+  // --- Alert delivery -----------------------------------------------------
+  // Endpoint POSTed when the nightly health check comes back red. Unset by
+  // default, in which case the result is only written to `_status/health.json`
+  // and nothing pushes it. Set it as a secret: for Slack and most incident
+  // tools the URL is itself the credential.
+  ALERT_WEBHOOK_URL?: string;
 }
 
 /** Ad platform a tag / tracking number belongs to. */
@@ -170,7 +177,16 @@ export interface Impression {
   campaignId: string;
   creativeId: string;
   ifaHash: string; // "anon" when LMT or missing
-  ifaPresent: boolean; // false when LMT=1 / IFA zeroed / missing
+  // False when the identifier is unusable for ANY reason: opted out, COPPA
+  // child-directed, zeroed/macro-shaped IFA, or an unusable hash salt. Governs
+  // identifier storage only.
+  ifaPresent: boolean;
+  // True only when the device actually signalled an opt-out (LMT=1) or the
+  // campaign is child-directed. Distinct from `ifaPresent` because an
+  // unexpanded macro leaves the IFA unusable while carrying no opt-out at all;
+  // reporting that device as opted out to a conversion API is a false
+  // statement about a user's choice.
+  lmt: boolean;
   appId: string;
   country: string;
   ifaType: string; // IFA namespace (e.g. "rida", "idfa"); "" when absent
