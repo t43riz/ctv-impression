@@ -53,10 +53,17 @@ tracker field. Roku's RAF replaces the `[[[...]]]` macros at fire time.
 https://pixels.postbackx.com/v1/pixel?advertiser_id=adv_udonis&campaign_id=camp_roku_test&creative_id=cre_roku_cert&exp=1797273063&sig=ab068b0ecb31b53bc801097e9d6159b9dc7eb338d9b8cb2bb7e08b929876b0cf&ifa=[[[RIDA]]]&lmt=[[[LMT]]]&app_id=[[[APPID]]]&cb=[[[CACHEBUSTER]]]
 ```
 
-> This is a **live** tag. It is signed, allowlisted, and serving now — you can
-> fire it as-is. The signature is valid through **2026-12-14 18:31 UTC**
-> (`exp=1797273063`); tell us the campaign flight dates and we will reissue
-> with a matching expiry.
+> ⚠️ **The `sig` above is an illustration, not a working signature** (see §2.1).
+> The endpoint returns a `200` and a 1×1 GIF for *every* request, including a
+> rejected one — that is deliberate, so the beacon never leaks validation state
+> to the device. The consequence is that firing a tag and getting a 200 proves
+> nothing: an invalid signature is recorded as `reject_bad_signature` and never
+> counted.
+>
+> A tag is only demonstrably live once a beacon fired with it appears as
+> `counted` in the reconciliation ledger. Generate a real one with
+> `npm run sign -- --advertiser ... --campaign ... --creative ... --ttl ...`
+> and confirm it counted before handing it to anyone.
 
 **Same tag, after RAF fills the macros on a real device:**
 
@@ -75,7 +82,9 @@ need to ensure RAF fills the device-level macros in §3.
 The signed message is `advertiser_id|campaign_id|creative_id|exp`, so the
 `sig` value depends on which advertiser the tag is issued to. The `sig` values in
 the examples above are illustrative; the real one comes from
-`npm run sign -- --campaign ... --creative ... --advertiser ...`. `ifa` and `lmt`
+`npm run sign -- --campaign ... --creative ... --advertiser ...`.
+`test/sign-url.test.ts` runs that generator against the Worker's own verifier,
+so the two cannot drift into emitting plausible-looking tags that are rejected. `ifa` and `lmt`
 can never be covered by the signature — the ad server substitutes them on the
 device after the tag is served — so those are protected by the per-IP rate limit
 and the dedup window instead.
