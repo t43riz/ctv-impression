@@ -3,9 +3,11 @@ import type { Env, Impression } from "./types";
 /**
  * Raw 30-day R2 tier (SPEC §7.3 / PRIVACY §3).
  *
- * One NDJSON object per *counted* impression, written to the RAW bucket.
- * Contents are hashed-IFA + dimensions only — never a raw identifier — and the
- * bucket's lifecycle rule deletes objects after 30 days. This tier is the
+ * One NDJSON object per *counted* impression, plus one per deduplicated
+ * repeat (`outcome: "duplicate"`), written to the RAW bucket. Since 2026-11-04
+ * rows also carry the raw device IP, connecting IP, user agent, full query and
+ * Cloudflare edge geo, unhashed, for call↔impression matching (owner
+ * decision). The bucket's lifecycle rule still deletes objects after 30 days. This tier is the
  * unsampled source for accurate reach/frequency and the target of DSAR
  * erasure (locate by `ifa_hash`).
  *
@@ -34,10 +36,60 @@ export interface RawRow {
   advertiser_id: string;
   app_id: string;
   country: string;
+  dma: string; // Nielsen DMA (Roku [[[METRO_CODE]]]), "" when unavailable
   ifa_hash: string; // salted hash, "anon" when non-attributable
   ifa_present: "0" | "1";
   ifa_type: string;
   platform: string;
+  roku_advertiser_id?: string;
+  roku_campaign_id?: string;
+  roku_creative_id?: string;
+  roku_creative_id_encoded?: string;
+  roku_postal_code?: string;
+  roku_cachebuster?: string;
+  /** `counted` or `duplicate`; rows written before this field are `counted`. */
+  outcome?: RawOutcome;
+  /**
+   * Unhashed capture for call matching (owner decision 2026-11-04). Every key
+   * is optional so rows written before this addition still parse.
+   */
+  device_ip?: string; // raw `device_ip` query value as Roku substituted it
+  connecting_ip?: string; // CF-Connecting-IP: the address that delivered the beacon
+  user_agent?: string;
+  query?: string; // full raw query string, macros as substituted
+  edge?: EdgeGeo; // Cloudflare's geolocation of the connecting address
+}
+
+export type RawOutcome = "counted" | "duplicate";
+
+/**
+ * Cloudflare's view of the *connecting* address. When Roku's ad server relays
+ * the beacon this is the server's location, not the viewer's, so `asn` /
+ * `as_org` are kept to tell the two cases apart.
+ */
+export interface EdgeGeo {
+  country?: string;
+  region?: string;
+  region_code?: string;
+  city?: string;
+  postal_code?: string;
+  metro_code?: string;
+  latitude?: string;
+  longitude?: string;
+  timezone?: string;
+  asn?: number;
+  as_org?: string;
+  colo?: string;
+}
+
+/** Per-request capture that is not part of the counted `Impression`. */
+export interface RawCapture {
+  outcome: RawOutcome;
+  deviceIp: string;
+  connectingIp: string;
+  userAgent: string;
+  query: string;
+  edge: EdgeGeo;
 }
 
 /** Build the R2 key for a raw row. Pure, so the layout is unit-testable. */
@@ -57,6 +109,7 @@ export async function writeRawEvent(
   env: Env,
   imp: Impression,
   nowSeconds: number,
+  capture?: RawCapture,
 ): Promise<void> {
   const iso = new Date(nowSeconds * 1000).toISOString();
   const key = rawObjectKey(imp, nowSeconds, crypto.randomUUID());
@@ -68,10 +121,27 @@ export async function writeRawEvent(
     advertiser_id: imp.advertiserId,
     app_id: imp.appId,
     country: imp.country,
+    dma: imp.dma,
     ifa_hash: imp.ifaHash,
     ifa_present: imp.ifaPresent ? "1" : "0",
     ifa_type: imp.ifaType,
     platform: imp.platform,
+    ...(imp.platform === "roku" ? {
+      roku_advertiser_id: imp.rokuAdvertiserId ?? "",
+      roku_campaign_id: imp.rokuCampaignId ?? "",
+      roku_creative_id: imp.rokuCreativeId ?? "",
+      roku_creative_id_encoded: imp.rokuCreativeIdEncoded ?? "",
+      roku_postal_code: imp.rokuPostalCode ?? "",
+      roku_cachebuster: imp.rokuCachebuster ?? "",
+    } : {}),
+    ...(capture ? {
+      outcome: capture.outcome,
+      device_ip: capture.deviceIp,
+      connecting_ip: capture.connectingIp,
+      user_agent: capture.userAgent,
+      query: capture.query,
+      edge: capture.edge,
+    } : {}),
   };
 
   await env.RAW.put(key, JSON.stringify(row) + "\n", {

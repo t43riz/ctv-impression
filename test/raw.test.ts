@@ -4,6 +4,7 @@ import {
   eraseRawByHash,
   RawMetadataMissingError,
   HASH_SHARD_LEN,
+  writeRawEvent,
 } from "../src/raw";
 import type { Env, Impression } from "../src/types";
 
@@ -27,7 +28,8 @@ const imp: Impression = {
   lmt: false,
   appId: "app",
   country: "US",
-  ifaType: "rida",
+  dma: "501",
+  ifaType: "ip",
   platform: "roku",
 };
 
@@ -48,6 +50,58 @@ describe("rawObjectKey", () => {
   it("places the shard before the campaign segment", () => {
     const key = rawObjectKey(imp, T, "u");
     expect(key.indexOf(`h=${TARGET_SHARD}`)).toBeLessThan(key.indexOf("camp"));
+  });
+});
+
+describe("writeRawEvent", () => {
+  it("preserves substituted Roku fields on each raw row without storing the device IP", async () => {
+    let body = "";
+    const env = {
+      RAW: { put: async (_key: string, data: string) => { body = data; } },
+    } as unknown as Env;
+    await writeRawEvent(env, {
+      ...imp,
+      rokuAdvertiserId: "roku-adv",
+      rokuCampaignId: "roku-camp",
+      rokuCreativeId: "roku-creative",
+      rokuCreativeIdEncoded: "abc+def/==",
+      rokuPostalCode: "90210",
+      rokuCachebuster: "cache-123",
+    }, T);
+    expect(JSON.parse(body)).toMatchObject({
+      roku_advertiser_id: "roku-adv",
+      roku_campaign_id: "roku-camp",
+      roku_creative_id: "roku-creative",
+      roku_creative_id_encoded: "abc+def/==",
+      roku_postal_code: "90210",
+      roku_cachebuster: "cache-123",
+    });
+    // No capture supplied: nothing beyond the impression dimensions is written.
+    expect(body).not.toContain("203.0.113");
+    expect(JSON.parse(body)).not.toHaveProperty("device_ip");
+  });
+
+  it("writes the unhashed capture for call matching when one is supplied", async () => {
+    let body = "";
+    const env = {
+      RAW: { put: async (_key: string, data: string) => { body = data; } },
+    } as unknown as Env;
+    await writeRawEvent(env, imp, T, {
+      outcome: "duplicate",
+      deviceIp: "203.0.113.7",
+      connectingIp: "198.51.100.20",
+      userAgent: "Roku/DVP-14.0",
+      query: "device_ip=203.0.113.7&dma501",
+      edge: { region_code: "TX", asn: 64500, as_org: "Example ISP" },
+    });
+    expect(JSON.parse(body)).toMatchObject({
+      outcome: "duplicate",
+      device_ip: "203.0.113.7",
+      connecting_ip: "198.51.100.20",
+      user_agent: "Roku/DVP-14.0",
+      query: "device_ip=203.0.113.7&dma501",
+      edge: { region_code: "TX", asn: 64500, as_org: "Example ISP" },
+    });
   });
 });
 

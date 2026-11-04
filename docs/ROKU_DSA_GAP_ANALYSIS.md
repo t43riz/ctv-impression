@@ -52,9 +52,9 @@ This requires a separate written approval or an addendum to the DSA. Until then
 | # | Document | Why we can't build without it | Cited |
 |---|---|---|---|
 | A1 | **Roku ad platform technical documentation & specifications** | The only normative source for the `Data Processing Flag` — the parameter that signals when COPPA / Child-Directed terms apply. DSA §5 makes our entire child-data obligation conditional on it. We have **no field for it at all**; `src/lib/beacon.ts:71` fakes it via a KV value we set ourselves, which does not satisfy §5 or DPP §10 | DSA §15 def. "Data Processing Flag"; §5 |
-| A2 | **RAF macro reference for third-party impression trackers** | Confirms exact tokens. Our tag assumes `[[[RIDA]]]`, `[[[LMT]]]`, `[[[CACHEBUSTER]]]`, `[[[APPID]]]` — flagged unconfirmed at `docs/ROKU_IMPRESSION_TAG.md:87`. Wrong tokens = pixel fires with literal strings | DSA §2(b) |
+| A2 | ~~**Macro reference for third-party impression trackers**~~ — **RESOLVED 2026-09-21** by Ads Manager support. Supported set is `[[[ADVERTISERID]]]`, `[[[CAMPAIGNID]]]`, `[[[CREATIVEID]]]`, `[[[CREATIVEID_URL]]]`, `[[[DEVICE_IP]]]`, `[[[CACHEBUSTER]]]`, `[[[COUNTRY]]]`, `[[[METRO_CODE]]]`, `[[[POSTAL_CODE]]]`. **No RIDA, LMT or APPID.** Tag reissued: identity is the salted-hashed device IP, and `0.0.0.0` carries the opt-out | DSA §2(b) |
 | A3 | **Pixel technical certification / QA procedure** | §2(b)(2) makes certification a precondition to going live; §2(b)(3) freezes the pixel afterward (no changes without re-certification). We need the checklist *before* finalizing the URL shape | DSA §2(b)(2)-(3) |
-| A4 | **Privacy Signals technical spec** | DPP §10 requires us to honor *and pass downstream* every opt-out / LDU / "do not sell" / "do not share" signal. We only handle `lmt`. Unknown how CCPA signals arrive | DPP §10 |
+| A4 | **Privacy Signals technical spec** | DPP §10 requires us to honor *and pass downstream* every opt-out / LDU / "do not sell" / "do not share" signal. On Ads Manager the **only** signal we receive is a zeroed `[[[DEVICE_IP]]]`, which conflates "user opted out" with "geographic privacy rules apply" — we cannot distinguish them, and no CCPA-specific signal reaches us at all | DPP §10 |
 | A5 | **Conversions API documentation** | Endpoint, auth scheme, `event_group_id` provisioning, event schema, and rate limits (DPP §15(a)(viii) makes exceeding them a breach). `CAPI_EVENT_GROUP_ID` is still `REPLACE_WITH_EVENT_GROUP_ID` in `wrangler.toml` | DPP §15 |
 | A6 | **Pre-Approved Vendor list + approval process** | DPP §11: no third party may Process Roku Data without written Roku approval. Our entire stack is Cloudflare — Workers, R2, KV, Durable Objects, Analytics Engine | DPP §11 |
 | A7 | **International Data Transfer Terms** | Incorporated by reference at DPP §6 but not attached. Company is in **Croatia (EEA)** processing US-user data — directly load-bearing, not boilerplate | DPP §6 |
@@ -87,23 +87,46 @@ re-signature required. Do this before ingesting anything.
 > Advertiser ID, Campaign ID, Creative ID, RIDA, Device IP, Timestamp, Cache
 > buster, aggregated/approximate geo, App ID and Limit Ad Tracking signals
 
+> **The licensed list is now wrong in both directions** (confirmed 2026-09-21).
+> It licenses **RIDA**, **App ID** and **Limit Ad Tracking signals**, none of
+> which Ads Manager actually sends to an impression tag. It does not clearly
+> name **DMA / Metro Code**, which we do receive.
+
+### Fields to remove (we never receive them)
+
+| Field | Reality |
+|---|---|
+| `RIDA` | Not exposed to Ads Manager impression tags. Device identity is now a salted hash of `[[[DEVICE_IP]]]` |
+| `App ID` | No `[[[APPID]]]` macro exists; the column is always `unknown` on Roku |
+| `Limit Ad Tracking signals` | No `[[[LMT]]]` macro. The opt-out arrives as `device_ip=0.0.0.0` |
+
 ### Fields to add
 
 | Field | Status in code | Note |
 |---|---|---|
+| `DMA / Metro Code` | collected from `[[[METRO_CODE]]]`, stored as blob10 | Supported macro; needs naming on the cover page. Arguably inside "aggregated/approximate geo", but get it named |
 | `Data Processing Flag` | **absent entirely** | Must be added to the cover page *and* to `src/lib/beacon.ts` |
-| `hh_id` (household ID) | collected `src/index.ts:111`, stored `src/recent.ts` | Not on the licensed list |
-| `region` / `city` | collected `src/index.ts:117-118` | "aggregated/approximate geo" is ambiguous — get these named explicitly |
-| `postal` | collected `src/index.ts:119` | **Highest risk.** DPP §5 classes "an end user's precise geo-location" as **Sensitive Data**, which we are flatly barred from Processing. Either get postal named explicitly as approximate, or **drop it** |
+| `region` / `city` | derived at the Cloudflare edge | "aggregated/approximate geo" is ambiguous — get these named explicitly |
+
+`postal` is **no longer collected** (dropped at ingest; `src/index.ts` records
+`""`). We are also deliberately **not** requesting the supported
+`[[[POSTAL_CODE]]]` macro, since DPP §5 classes precise geo-location as
+Sensitive Data we may not Process.
+
+`hh_id` is only ever populated on the Universal Ads path, never on Roku.
 
 ### Clarifications to request on the same email
 
 1. Whether **Device IP may be retained raw** for the attribution window (we hold
    it in `RecentImpressions`, `src/recent.ts`) or must be hashed at ingest.
-2. Whether **RIDA may be retained raw** for the same window (`recent.ts` does).
-   DSA §3(b) and DPP §12 restrict *reporting* output; retention limits are unstated.
-3. Confirmation that the **Data Sharing Method** stays "Company's pixel" and that
+   **This matters more now than before:** the device IP is no longer one
+   identifier among several, it is the *only* identity signal Ads Manager gives
+   us, so a "hash at ingest" answer removes call attribution entirely.
+2. Confirmation that the **Data Sharing Method** stays "Company's pixel" and that
    no data feed / SFTP path is contemplated (DSA §2(c)).
+3. Whether Roku offers any supported route to **deduplicated reach** or a stable
+   device/household identifier. Without one, reach is an IP-derived household
+   approximation and must be labelled as such to advertisers.
 
 ---
 
@@ -135,9 +158,9 @@ re-signature required. Do this before ingesting anything.
 
 | # | Gap | Location | Requirement |
 |---|---|---|---|
-| F1 | **Market not enforced.** Accepts any country and stamps `"XX"` | `src/lib/beacon.ts:82-83` | DSA §3(a) license is Market-limited (United States). Non-US should be rejected, not counted |
-| F2 | **No flight-date enforcement.** `exp` is a rolling TTL (30d), not campaign end date; KV holds no dates | `src/lib/beacon.ts`, `CAMPAIGNS` KV | DSA §2(b)(1) — collect "only for the duration of the advertising campaign" |
-| F3 | **No global kill switch.** Nothing can disable ingestion on demand | `src/index.ts`, `src/admin.ts` | DSA §2(b) — Roku may demand Pixel removal at any time and we "will promptly comply" |
+| F1 | ~~**Market not enforced**~~ — **RESOLVED.** A beacon whose country falls outside `LICENSED_MARKETS` (default `US`) is rejected as `out_of_market`. Roku's `[[[COUNTRY]]]` macro is authoritative; the edge value is only a fallback. A campaign entry may narrow markets further. Unknown country (`XX`) is counted by default, since on a US-only buy that is far more likely a missing macro than foreign delivery; set `REJECT_UNKNOWN_MARKET=true` to reject it too | `src/lib/beacon.ts` | DSA §3(a) |
+| F2 | ~~**No flight-date enforcement**~~ — **RESOLVED.** A campaign entry may carry `start`/`end`; beacons outside the window are rejected as `outside_flight`. A bare `end` date covers the whole UTC day. `exp` remains a rolling signature TTL and is deliberately not reused for this | `src/lib/beacon.ts`, `CAMPAIGNS` KV | DSA §2(b)(1) — collect "only for the duration of the advertising campaign" |
+| F3 | ~~**No global kill switch**~~ — **RESOLVED.** `INGEST_DISABLED=true` keeps serving the pixel but stops counting and matching | `src/index.ts` | DSA §2(b) — Roku may demand Pixel removal at any time and we "will promptly comply" |
 | F4 | **DSAR flow is backwards.** Erases unilaterally | `src/admin.ts` `/admin/dsar` | DPP §7 — notify Roku immediately, do **not** act without written consent |
 | F5 | **No Data Processing Flag handling** | `src/lib/beacon.ts:65-77` | DSA §5 / DPP §10 — COPPA treatment must be driven by Roku's signal, not our own KV value |
 | F6 | **No downstream signal pass-through** | — | DPP §10 — must honor *and pass on* Privacy Signals to any Downstream Ad Partner |
@@ -167,15 +190,16 @@ questions. Grouping them so it's easy to route internally.
   `Data Processing Flag` described in the §15 definition. §5 makes our entire
   Child-Directed Content handling conditional on this signal, so we need the
   parameter name, its possible values, and how it is delivered on the beacon.
-- **RAF macro reference** for third-party impression trackers, so we can confirm
-  the exact tokens. We are currently assuming `[[[RIDA]]]`, `[[[LMT]]]`,
-  `[[[CACHEBUSTER]]]` and `[[[APPID]]]`.
 - **Pixel technical certification / QA procedure** per §2(b)(2). Since §2(b)(3)
   freezes the pixel once certified, we'd like the checklist before we finalize
   the tag.
 - **Privacy Signals specification** per DPP §10 — how opt-out, "do not sell",
   "do not share" and LDU signals reach us, and the expected downstream
-  pass-through format.
+  pass-through format. Ads Manager support has confirmed the only device-level
+  signal available to an impression tag is a zeroed `[[[DEVICE_IP]]]`, which
+  conflates a user opt-out with a geographic privacy restriction. We honor it
+  as an opt-out either way, but we cannot distinguish the two or pass a
+  specific signal downstream, so please confirm that satisfies §10.
 - **International Data Transfer Terms**, incorporated at DPP §6. UDONIS is
   established in Croatia, so this one is material for us.
 
@@ -228,21 +252,31 @@ to production.
 
 The Campaign Data list reads: *Advertiser ID, Campaign ID, Creative ID, RIDA,
 Device IP, Timestamp, Cache buster, aggregated/approximate geo, App ID and Limit
-Ad Tracking signals.* We'd like to add or clarify:
+Ad Tracking signals.*
 
-- **Data Processing Flag** — per item 1 above.
-- **Household ID**, if one is exposed to partner impression trackers.
-- **Region and city** — we read these as within "aggregated/approximate geo" but
-  would rather have them named.
-- **Postal code** — we'd like your read here. DPP §5 treats precise
-  geo-location as Sensitive Data. If postal code isn't comfortably "approximate"
-  for you, we'll drop it rather than carry the ambiguity.
+Ads Manager support has since confirmed that **RIDA, App ID and Limit Ad
+Tracking signals are not available** to third-party impression tags — the
+supported macro set is `[[[ADVERTISERID]]]`, `[[[CAMPAIGNID]]]`,
+`[[[CREATIVEID]]]`, `[[[CREATIVEID_URL]]]`, `[[[DEVICE_IP]]]`,
+`[[[CACHEBUSTER]]]`, `[[[COUNTRY]]]`, `[[[METRO_CODE]]]` and
+`[[[POSTAL_CODE]]]`. So the licensed list currently grants us three fields we
+never receive, and omits one we do. We'd like to correct it in both directions:
 
-Two retention clarifications while we're in the cover page:
+- **Remove** RIDA, App ID and Limit Ad Tracking signals.
+- **Add DMA / Metro Code** — arguably inside "aggregated/approximate geo", but
+  we'd rather have it named.
+- **Add Data Processing Flag** — per item 1 above.
+- **Name region and city** explicitly, for the same reason.
+- **Postal code**: we are *not* requesting it, even though the macro exists.
+  DPP §5 treats precise geo-location as Sensitive Data, and we'd rather not
+  carry the ambiguity. Flagging in case you expect partners to collect it.
 
-- Whether **Device IP** may be retained in raw form for a bounded attribution
-  window, or must be hashed at ingest.
-- The same question for **RIDA**.
+One retention clarification, which matters more than it did before:
+
+- May **Device IP** be retained in raw form for a bounded attribution window
+  (currently 60 minutes), or must it be hashed at ingest? Now that RIDA is
+  unavailable, the device IP is the only identity signal we receive, so this
+  answer decides whether call attribution is possible at all.
 
 **6. Reporting attribution (§3(b))**
 

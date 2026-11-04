@@ -62,6 +62,15 @@ export interface Env {
   // Global kill switch (DSA §2(b), Roku may demand Pixel removal on demand).
   // "true" => keep serving the pixel but stop counting and matching.
   INGEST_DISABLED?: string;
+  // Comma-separated ISO-3166 alpha-2 codes the data license covers (DSA §3(a)
+  // grants a Market-limited license; ours is the United States). A campaign
+  // entry may narrow this further. Unset falls back to "US".
+  LICENSED_MARKETS?: string;
+  // "true" rejects a beacon whose country cannot be determined ("XX"). Default
+  // counts it: on a US-only buy an unresolved country is far more likely to be
+  // a missing macro than genuine out-of-market traffic, and discarding real
+  // delivery is its own compliance problem.
+  REJECT_UNKNOWN_MARKET?: string;
   // Device identifiers are sent to a conversion API only when the match is
   // strong enough. Below either bound we fall back to phone_only.
   MIN_MATCH_CONFIDENCE?: string; // default 0.6
@@ -120,12 +129,12 @@ export interface NumberMapping {
 /**
  * Compact impression record held in the matching store for the attribution
  * window only. Holds RAW ip/rida (Roku CAPI needs them unhashed); purged after
- * the window. RIDA is empty under LMT.
+ * the window. Both are empty when the device opted out.
  */
 export interface ImpressionRecord {
   ts: number; // unix seconds
-  ip: string; // CF-Connecting-IP (true device IP)
-  rida: string; // raw IFA/RIDA, "" under LMT
+  ip: string; // Roku-attested [[[DEVICE_IP]]] on Roku; CF-Connecting-IP on UA
+  rida: string; // raw advertising ID (UA only — Roku exposes none), "" on opt-out
   hhId: string; // household ID (UA), "" when absent
   region: string; // cf.region (state/province)
   city: string;
@@ -176,7 +185,18 @@ export interface Impression {
   advertiserId: string;
   campaignId: string;
   creativeId: string;
-  ifaHash: string; // "anon" when LMT or missing
+  // Roku-provided IDs are separate from the signed tracking IDs above. A
+  // shared tag can report native IDs without letting macros bypass the HMAC.
+  rokuAdvertiserId?: string;
+  rokuCampaignId?: string;
+  rokuCreativeId?: string;
+  rokuCreativeIdEncoded?: string;
+  rokuPostalCode?: string;
+  rokuCachebuster?: string;
+  // Salted hash of the device identity. On Roku (Ads Manager) the only
+  // device-level macro is [[[DEVICE_IP]]], so this is a hash of "ip:<addr>";
+  // on UA it is a hash of the advertising ID. "anon" when non-attributable.
+  ifaHash: string;
   // False when the identifier is unusable for ANY reason: opted out, COPPA
   // child-directed, zeroed/macro-shaped IFA, or an unusable hash salt. Governs
   // identifier storage only.
@@ -189,7 +209,11 @@ export interface Impression {
   lmt: boolean;
   appId: string;
   country: string;
-  ifaType: string; // IFA namespace (e.g. "rida", "idfa"); "" when absent
+  // Nielsen DMA from Roku's [[[METRO_CODE]]] (US only); "" when unavailable.
+  dma: string;
+  // Identity namespace: "ip" on Roku (hashed device IP), the advertising-ID
+  // namespace on UA (e.g. "rida", "idfa"), "" when absent.
+  ifaType: string;
   platform: Platform; // tag platform ("roku" default, "ua")
 }
 
@@ -200,6 +224,12 @@ export type RejectReason =
   | "bad_signature"
   | "expired"
   | "not_allowlisted"
+  // Beacon arrived outside the campaign's flight window. DSA §2(b)(1) licenses
+  // collection "only for the duration of the advertising campaign", so a
+  // beacon before start or after end is unlicensed, not merely late.
+  | "outside_flight"
+  // Impression served outside the Market the DSA §3(a) license covers.
+  | "out_of_market"
   | "rate_limited"
   // Secret is still the shipped placeholder, so nothing can be trusted.
   | "not_configured";

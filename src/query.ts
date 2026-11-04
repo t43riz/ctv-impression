@@ -84,8 +84,21 @@ export interface ReachEstimate {
 }
 
 /**
- * ESTIMATE ONLY. count(DISTINCT) on a non-index, sampled field is unreliable.
- * Only counts attributable rows (ifa_present = '1'). For accreditable reach,
+ * ESTIMATE ONLY, and on Roku it is an estimate of a *coarser* thing than the
+ * name suggests.
+ *
+ * Roku Ads Manager exposes no RIDA to impression tags, so a Roku row's
+ * identity hash is derived from the device IP. Every TV, phone and laptop
+ * behind one router shares a public IP, so distinct hashes approximate
+ * HOUSEHOLDS, not devices — and a household on a dynamic IP is recounted each
+ * time the address changes, while carrier-grade NAT collapses many households
+ * into one. Treat the Roku number as a loose lower bound on households, never
+ * as device reach or as frequency.
+ *
+ * On UA, where a real advertising ID is available, this remains device reach.
+ *
+ * Separately, count(DISTINCT) on a non-index, sampled field is unreliable.
+ * Only counts attributable rows (ifa_present = '1'). For accreditable figures,
  * use the raw R2 export instead.
  */
 export async function reachEstimate(

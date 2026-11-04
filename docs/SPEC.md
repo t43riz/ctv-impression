@@ -372,12 +372,13 @@ ORDER BY hour;
 | Tag hijacking / injection | Validate + allowlist `campaign_id`/`creative_id`; format-check all params |
 | Replay | Dedup store (Durable Object) rejects repeats within the window |
 | DDoS | Cloudflare's built-in DDoS protection (add per-IP/IFA rate limiting for low-and-slow inflation) |
-| Data privacy | **IFA is salted-hashed, never stored raw**; raw device IP not persisted; `lmt=1` honored |
+| Data privacy | **The device identifier is salted-hashed, never stored raw** (the device IP on Roku, the advertising ID on UA); raw IP not persisted in analytics; opt-out honored (`device_ip=0.0.0.0` on Roku, `lmt=1` on UA) |
 | Unauthorized read access | AE SQL API token scoped to "Account Analytics Read"; stored as a secret |
 
-> **Correction (v0.2):** The original "No PII stored" claim was inaccurate — the
-> IFA (RIDA) is personal data. We now never persist it raw (salted SHA-256
-> only), and we honor Limit-Ad-Tracking. The Roku watermark, by itself, is not a
+> **Correction (v0.2):** The original "No PII stored" claim was inaccurate — an
+> advertising ID and an IP address are both personal data. We never persist the
+> device identifier raw in analytics (salted SHA-256 only), and we honor the
+> platform's opt-out signal. The Roku watermark, by itself, is not a
 > verification mechanism unless validated server-side; until we are a
 > Roku-recognized measurement partner with verification tooling, our authenticity
 > control is the HMAC signature above. See `docs/PRIVACY.md`.
@@ -487,17 +488,18 @@ creative) back to impressions and fires conversions to Roku's Conversions API.
 Because a call provides **only the caller's phone number — no device ID**,
 matching is **probabilistic**: the dialed number maps to a creative, and we
 select the best-guess in-window impression (scored by time proximity + coarse
-area-code geo) and send Roku its IP/RIDA + a confidence score. When no
-impression is in-window, we fall back to the hashed caller phone so the
-conversion still fires. A short-lived `RecentImpressions` Durable Object holds
-raw IP/RIDA for the attribution window only (AE cannot do 1:1 matching).
+area-code geo) and send Roku its IP + a confidence score. When no impression is
+in-window, we fall back to the hashed caller phone so the conversion still
+fires. A short-lived `RecentImpressions` Durable Object holds the raw device IP
+for the attribution window only (AE cannot do 1:1 matching).
 
 Full design, CAPI payload mapping, PBX webhook contract, and accuracy/limitation
 notes are in **`docs/ATTRIBUTION.md`**.
 
-> **Probabilistic, not deterministic.** The IP/RIDA sent to Roku is a best
-> guess, not a confirmed device. Disambiguation degrades as in-window
-> impressions per creative grow; the confidence score reflects this.
+> **Probabilistic, not deterministic.** The IP sent to Roku is a best guess, not
+> a confirmed device — and on Ads Manager, where no advertising ID exists, it
+> identifies a household rather than a device. Disambiguation degrades as
+> in-window impressions per creative grow; the confidence score reflects this.
 
 ---
 

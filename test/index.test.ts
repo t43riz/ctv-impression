@@ -125,10 +125,32 @@ function pixel(
   return req;
 }
 
+/**
+ * Roku's attested device IP, from the [[[DEVICE_IP]]] macro. Deliberately
+ * different from `IP` (CF-Connecting-IP) so a test cannot pass by reading the
+ * connecting address where it should read the macro.
+ */
+const DEVICE_IP = "203.0.113.7";
+
+/**
+ * Roku Ads Manager shape: no RIDA and no LMT macro are available, so identity
+ * is the attested device IP and "0.0.0.0" is the opt-out.
+ */
 const baseParams = {
   advertiser_id: "adv1",
   campaign_id: "camp1",
   creative_id: "cre1",
+  device_ip: DEVICE_IP,
+  country: "US",
+  dma: "501",
+};
+
+/** Universal Ads shape: a real advertising ID plus a separate LMT flag. */
+const uaParams = {
+  advertiser_id: "adv1",
+  campaign_id: "camp1",
+  creative_id: "cre1",
+  pf: "ua",
   ifa: "device-identifier-1",
   lmt: "0",
   app_id: "com.example.channel",
@@ -244,7 +266,13 @@ describe("pixel ingest", () => {
     const row = JSON.parse([...h.raw.objects.values()][0].value) as Record<string, unknown>;
     expect(row.campaign_id).toBe("camp1");
     expect(row.ifa_present).toBe("1");
-    expect(row.ifa_hash).not.toBe("device-identifier-1");
+    // The identity key stays a hash, but since 2026-11-04 the raw tier also
+    // keeps the unhashed device IP for call matching (owner decision).
+    expect(row.ifa_hash).not.toBe(DEVICE_IP);
+    expect(row.device_ip).toBe(DEVICE_IP);
+    expect(row.outcome).toBe("counted");
+    expect(typeof row.query).toBe("string");
+    expect(row.dma).toBe("501");
 
     expect(h.recent.size).toBe(1);
     expect(h.recent.get("cre1")).toBeDefined();
@@ -257,7 +285,12 @@ describe("pixel ingest", () => {
 
     expect(outcomes(h.recon)).toEqual(["received", "counted", "received", "duplicate"]);
     expect(h.analytics.points).toHaveLength(1);
-    expect(h.raw.objects.size).toBe(1);
+    // The repeat is still an ad play, so it is kept for call matching, but it
+    // is flagged and never counted.
+    const rows = [...h.raw.objects.values()].map(
+      (o) => JSON.parse(o.value) as Record<string, unknown>,
+    );
+    expect(rows.map((r) => r.outcome).sort()).toEqual(["counted", "duplicate"]);
   });
 
   it("frequency-caps non-attributable beacons by coarse IP + hour", async () => {
@@ -273,7 +306,7 @@ describe("pixel ingest", () => {
 
   it("never writes a raw identifier for an opted-out device", async () => {
     const h = makeHarness();
-    await beacon(h.env, { ...baseParams, ifa: "0", lmt: "1" });
+    await beacon(h.env, { ...baseParams, device_ip: "0.0.0.0" });
 
     const row = JSON.parse([...h.raw.objects.values()][0].value) as Record<string, unknown>;
     expect(row.ifa_present).toBe("0");
@@ -284,9 +317,10 @@ describe("pixel ingest", () => {
   it("withholds the device IP from the matching store under LMT", async () => {
     // An IP is a device identifier, and the conversion clients withhold it
     // under LMT anyway — so storing it retains an opted-out device's identifier
-    // for a send that provably never happens.
+    // for a send that provably never happens. On Ads Manager the opt-out
+    // arrives as a zeroed DEVICE_IP, not as an LMT flag.
     const h = makeHarness();
-    await beacon(h.env, { ...baseParams, lmt: "1" });
+    await beacon(h.env, { ...baseParams, device_ip: "0.0.0.0" });
 
     const recorded = h.recentRows("cre1");
     expect(recorded).toHaveLength(1);
@@ -300,7 +334,7 @@ describe("pixel ingest", () => {
     // must apply to the highest-sensitivity population in the system.
     const h = makeHarness();
     h.campaigns.map.set("campaign:kids", "child_directed");
-    await beacon(h.env, { ...baseParams, campaign_id: "kids", lmt: "0" });
+    await beacon(h.env, { ...baseParams, campaign_id: "kids" });
 
     const recorded = h.recentRows("cre1");
     expect(recorded).toHaveLength(1);
@@ -308,25 +342,45 @@ describe("pixel ingest", () => {
     expect(recorded[0].rida).toBe("");
   });
 
-  it("still records the IP for a consenting device", async () => {
-    // The suppression must be scoped to opted-out traffic: attribution depends
-    // on this IP for every other impression.
+  it("keeps the UA advertising-ID path working alongside Roku's IP identity", async () => {
+    // The two platforms use different identity schemes on the same endpoint;
+    // a UA tag must still resolve its RIDA rather than look for a DEVICE_IP.
+    const h = makeHarness();
+    await beacon(h.env, uaParams);
+
+    expect(terminal(h.recon)).toEqual(["counted"]);
+    const recorded = h.recentRows("cre1");
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].rida).toBe("device-identifier-1");
+    expect(recorded[0].lmt).toBe(0);
+
+    const row = JSON.parse([...h.raw.objects.values()][0].value) as Record<string, unknown>;
+    expect(row.platform).toBe("ua");
+    expect(row.ifa_type).toBe("rida");
+    expect(row.ifa_present).toBe("1");
+  });
+
+  it("records Roku's attested device IP, not the connecting address", async () => {
+    // On CTV the beacon is frequently relayed, so CF-Connecting-IP can belong
+    // to an intermediary. Attribution must use the address Roku attests to.
     const h = makeHarness();
     await beacon(h.env, baseParams);
 
     const recorded = h.recentRows("cre1");
-    expect(recorded[0].ip).toBe(IP);
+    expect(recorded[0].ip).toBe(DEVICE_IP);
+    expect(recorded[0].ip).not.toBe(IP);
     expect(recorded[0].lmt).toBe(0);
   });
 
-  it("does not mark a consenting device as opted out when its IFA is unusable", async () => {
+  it("does not mark a consenting device as opted out when its identifier is unusable", async () => {
     // An unexpanded macro leaves the identifier unusable, but the device opted
     // out of nothing. `lmt` becomes `opt_out` on the conversion payload, so
     // deriving it from identifier availability reports a fabricated opt-out to
     // the platform — a false statement about a user's choice under a signed
-    // data agreement — and needlessly suppresses attribution.
+    // data agreement — and needlessly suppresses attribution. Distinct from a
+    // zeroed DEVICE_IP, which IS a real opt-out.
     const h = makeHarness();
-    await beacon(h.env, { ...baseParams, ifa: "[[[RIDA]]]", lmt: "0" });
+    await beacon(h.env, { ...baseParams, device_ip: "[[[DEVICE_IP]]]" });
 
     const recorded = h.recentRows("cre1");
     expect(recorded).toHaveLength(1);
@@ -450,7 +504,9 @@ describe("pixel ingest failure handling", () => {
       expect(record, `MATCH_WINDOW_MINUTES=${configured}: recorded`).toBeDefined();
       const sent = new URL(record!.url).searchParams.get("window");
       expect(sent, `MATCH_WINDOW_MINUTES=${configured}: outgoing window`).toBe(String(expected));
-      expect(h.recent.get("cre1")?.kv.get("windowMin")).toBe(expected);
+      // The store no longer persists a purge window: rows are retained forever
+      // and the window only filters /match (owner decision 2026-11-04).
+      expect(h.recent.get("cre1")?.kv.get("windowMin")).toBeUndefined();
     }
   });
 

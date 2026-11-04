@@ -11,9 +11,11 @@ import { scoreCandidates, DEFAULT_MAX_MATCH_CANDIDATES } from "./lib/match";
  * individual rows, so it cannot be used for 1:1 matching. This DO keeps a small,
  * full-fidelity, short-lived set instead.
  *
- * Privacy: this is the ONLY place we hold the RAW device IP and RAW RIDA, and
- * only for the attribution window — Roku's CAPI requires them unhashed. An alarm
- * purges anything older than the window. RIDA is empty for LMT impressions.
+ * Retention: rows are kept permanently (owner decision 2026-11-04). The match
+ * window is applied as a query filter in `/match`, never as a deletion. The
+ * raw device IP (and, on UA, the raw advertising ID) is also kept unhashed in
+ * the R2 raw tier, which is bucket-locked against deletion. Both identifiers
+ * are empty when the device opted out.
  *
  * Routing: callers use idFromName(creativeId) so all impressions and the call
  * lookup for a creative land on the same instance.
@@ -55,8 +57,6 @@ export class RecentImpressions implements DurableObject {
       // `DELETE ... WHERE ts < NaN` matches nothing — silently retaining raw
       // IP/RIDA past the attribution window. Never store anything but a
       // positive number.
-      const requested = Number(url.searchParams.get("window"));
-      const windowMin = Number.isFinite(requested) && requested > 0 ? requested : 60;
       this.sql.exec(
         "INSERT INTO imp (ts, ip, rida, hh_id, region, city, postal, lmt) VALUES (?,?,?,?,?,?,?,?)",
         rec.ts,
@@ -68,7 +68,11 @@ export class RecentImpressions implements DurableObject {
         rec.postal,
         rec.lmt ? 1 : 0,
       );
-      await this.ensureAlarm(windowMin);
+      // An alarm left armed by the purging version is cancelled so it can
+      // never run a DELETE (the current alarm() is a no-op either way).
+      if ((await this.state.storage.getAlarm()) !== null) {
+        await this.state.storage.deleteAlarm();
+      }
       return new Response(null, { status: 204 });
     }
 
@@ -167,43 +171,19 @@ export class RecentImpressions implements DurableObject {
     return new Response("not found", { status: 404 });
   }
 
-  /** Purge records older than the window; reschedule while rows remain. */
+  /**
+   * Retention: nothing is ever deleted (owner decision 2026-11-04).
+   *
+   * This used to purge rows older than the match window, which destroyed the
+   * raw IPs needed to re-run matching. `/match` already filters by
+   * `ts >= callTs - window`, so retaining old rows changes no match result. The
+   * handler is kept as a no-op so an alarm armed by an earlier version fires
+   * harmlessly instead of running the old DELETE.
+   */
   async alarm(): Promise<void> {
-    const stored = await this.state.storage.get<number>("windowMin");
-    const windowMin = Number.isFinite(stored) && (stored as number) > 0 ? (stored as number) : 60;
-    const cutoff = Math.floor(Date.now() / 1000) - windowMin * 60;
-    this.sql.exec("DELETE FROM imp WHERE ts < ?", cutoff);
-    const remaining =
-      this.sql.exec<{ c: number }>("SELECT count(*) AS c FROM imp").toArray()[0]
-        ?.c ?? 0;
-    if (remaining > 0) {
-      await this.state.storage.setAlarm(Date.now() + 5 * 60 * 1000);
-    }
+    // intentionally empty: retain all rows
   }
 
-  /**
-   * Persist the window this instance retains on, and keep the purge alarm armed.
-   *
-   * The stored window is what `alarm()` purges against, so it has to track the
-   * configured value. Lowering `MATCH_WINDOW_MINUTES` previously left the
-   * instance purging on the *first* window it ever saw while `/match` queried
-   * the new, shorter one: raw IP/RIDA then outlived the attribution window the
-   * operator had asked for, with no signal. When the window shrinks the alarm is
-   * re-armed immediately so the longer-retained rows are dropped on the next
-   * tick rather than at the old cadence.
-   */
-  private async ensureAlarm(windowMin: number): Promise<void> {
-    if (!Number.isFinite(windowMin) || windowMin <= 0) return;
-    const stored = await this.state.storage.get<number>("windowMin");
-    const shrank = typeof stored === "number" && windowMin < stored;
-    if (stored !== windowMin) {
-      await this.state.storage.put("windowMin", windowMin);
-    }
-    const current = await this.state.storage.getAlarm();
-    if (current === null || shrank) {
-      await this.state.storage.setAlarm(Date.now() + (shrank ? 0 : 5 * 60 * 1000));
-    }
-  }
 }
 
 /** Helper: record an impression into the creative's matching store. */

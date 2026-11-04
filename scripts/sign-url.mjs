@@ -13,7 +13,9 @@
  * generation time, so set --ttl to the campaign flight length.
  *
  * Platforms:
- *   roku (default) — Roku RAF macros [[[RIDA]]] etc. (docs/ROKU_IMPRESSION_TAG.md)
+ *   roku (default) — Roku Ads Manager macros: [[[DEVICE_IP]]], [[[COUNTRY]]],
+ *                    [[[METRO_CODE]]], [[[CACHEBUSTER]]]. No RIDA / LMT /
+ *                    APPID macro exists (docs/ROKU_IMPRESSION_TAG.md §3).
  *   ua             — IAB/VAST macros [IFA] etc. for Universal Ads / FreeWheel
  *                    (docs/UA_IMPRESSION_TAG.md; confirm exact tokens with UA)
  */
@@ -72,16 +74,24 @@ const macroTail =
       "&lmt=[LIMITADTRACKING]" +
       "&app_id=[APPBUNDLE]" +
       "&cb=[CACHEBUSTING]"
-    : // Roku's identifier is always a RIDA, so the namespace is a constant here
-      // rather than a macro (RAF has no ifa_type token). Without it the column
-      // is empty and platform mix is unmeasurable. Verified against production:
-      // the signature does not cover ifa_type, so adding it does not
-      // invalidate a tag.
-      "&ifa=[[[RIDA]]]" +
-      "&ifa_type=rida" +
-      "&lmt=[[[LMT]]]" +
-      "&app_id=[[[APPID]]]" +
-      "&cb=[[[CACHEBUSTER]]]";
+    : // Roku Ads Manager accepts ONLY the macros documented at
+      // https://help.ads.roku.com/en/articles/10386309 — there is no RIDA,
+      // no LMT and no APPID token. Sending an unsupported macro leaves the
+      // literal text in the URL, so the list below must not be extended
+      // without confirming against that page.
+      //
+      // Identity is therefore the attested device IP, and the opt-out signal
+      // is folded into it: Roku sends 0.0.0.0 when the device opted out or
+      // privacy rules forbid sharing the address.
+      "&device_ip=[[[DEVICE_IP]]]" +
+      "&country=[[[COUNTRY]]]" +
+      "&dma=[[[METRO_CODE]]]" +
+      "&cb=[[[CACHEBUSTER]]]" +
+      "&roku_advertiser_id=[[[ADVERTISERID]]]" +
+      "&roku_campaign_id=[[[CAMPAIGNID]]]" +
+      "&roku_creative_id=[[[CREATIVEID_URL]]]" +
+      "&roku_creative_id_encoded=[[[CREATIVEID]]]" +
+      "&roku_postal_code=[[[POSTAL_CODE]]]";
 
 // Emits the canonical versioned path. The signed message is
 // `advertiser|campaign|creative|exp` (src/lib/crypto.ts) and does not cover the

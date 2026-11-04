@@ -29,6 +29,10 @@ interface AggRow {
   advertiser_id: string;
   ifa_present: string;
   platform: string; // '' on rows written before the blob9 addition
+  dma: string; // '' on rows written before the blob10 addition
+  roku_advertiser_id: string;
+  roku_campaign_id: string;
+  roku_creative_id: string;
   impressions: number;
 }
 
@@ -55,12 +59,16 @@ export function buildQuery(date: string, offset: number, limit: number): string 
       blob6 AS advertiser_id,
       blob7 AS ifa_present,
       blob9 AS platform,
+      blob10 AS dma,
+      blob11 AS roku_advertiser_id,
+      blob12 AS roku_campaign_id,
+      blob13 AS roku_creative_id,
       sum(_sample_interval) AS impressions
     FROM ${DATASET}
     WHERE timestamp >= toDateTime(${sqlString(`${date} 00:00:00`)})
       AND timestamp <  toDateTime(${sqlString(`${date} 00:00:00`)}) + INTERVAL '1' DAY
-    GROUP BY hour, campaign_id, creative_id, country, app_id, advertiser_id, ifa_present, platform
-    ORDER BY hour, campaign_id, creative_id, country, app_id, advertiser_id, ifa_present, platform
+    GROUP BY hour, campaign_id, creative_id, country, app_id, advertiser_id, ifa_present, platform, dma, roku_advertiser_id, roku_campaign_id, roku_creative_id
+    ORDER BY hour, campaign_id, creative_id, country, app_id, advertiser_id, ifa_present, platform, dma, roku_advertiser_id, roku_campaign_id, roku_creative_id
     LIMIT ${sqlNumber(limit)} OFFSET ${sqlNumber(offset)}
     FORMAT JSON`;
 }

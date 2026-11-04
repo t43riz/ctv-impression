@@ -13,7 +13,7 @@ import { runExport } from "./export";
 import { handleCall } from "./call";
 import { handleAdmin } from "./admin";
 import { allowRequest } from "./ratelimit";
-import { writeRawEvent } from "./raw";
+import { writeRawEvent, type RawCapture, type RawOutcome } from "./raw";
 import { recordRecon, terminalOutcomeRecorder } from "./lib/recon";
 import { checkReconHealth, checkExportFreshness } from "./monitor";
 
@@ -46,7 +46,20 @@ async function handlePixel(
   // Policy §5 classes precise geo-location as Sensitive Data we may not
   // Process, and it is absent from the licensed Campaign Data list.
   const cfFull = request.cf as
-    | { country?: string; region?: string; city?: string }
+    | {
+        country?: string;
+        region?: string;
+        regionCode?: string;
+        city?: string;
+        postalCode?: string;
+        metroCode?: string;
+        latitude?: string;
+        longitude?: string;
+        timezone?: string;
+        asn?: number;
+        asOrganization?: string;
+        colo?: string;
+      }
     | undefined;
   const trueIp = request.headers.get("CF-Connecting-IP") ?? "";
 
@@ -91,31 +104,81 @@ async function handlePixel(
       }
 
       const imp = result.impression;
+      // The device IP comes from Roku's [[[DEVICE_IP]]] macro, not from
+      // CF-Connecting-IP. On CTV the beacon is frequently relayed rather than
+      // sent by the TV itself, so the connecting address can belong to an
+      // intermediary; the macro is the address Roku attests to.
+      const deviceIp = result.deviceIp;
 
       // Deduplication / replay guard. Attributable impressions key on the
-      // salted IFA hash; the rest (LMT, child-directed, zeroed or unexpanded
-      // IFA) fall back to a coarse salted IP + hour key so they are still
-      // frequency-capped rather than counting without bound. During a salt
-      // rotation the previous-salt key is checked as an alias.
+      // salted identity hash (device IP on Roku, advertising ID on UA); the
+      // rest (opt-out, child-directed, unexpanded macro) fall back to a coarse
+      // salted IP + hour key so they are still frequency-capped rather than
+      // counting without bound. During a salt rotation the previous-salt key
+      // is checked as an alias.
+      //
+      // The fallback uses CF-Connecting-IP deliberately: this branch is only
+      // reached when no attested device IP is available, so the connecting
+      // address is the sole remaining signal. It is salted, bucketed hourly and
+      // short-lived, so it stores no durable identifier.
       const ttl = configInt(env.DEDUP_WINDOW_HOURS, 24) * 3600;
       const dedupNonAttributable = env.DEDUP_NON_ATTRIBUTABLE !== "false";
       const dedupK =
         dedupKey(imp) ??
         (await nonAttributableDedupKey(env, imp, trueIp, nowSeconds, dedupNonAttributable));
 
+      // Unhashed per-beacon capture for call matching (owner decision
+      // 2026-11-04). Written to the 30-day raw tier only, never to Analytics
+      // Engine or the long-term aggregate.
+      const capture = (outcome: RawOutcome): RawCapture => ({
+        outcome,
+        deviceIp: url.searchParams.get("device_ip") ?? "",
+        connectingIp: trueIp,
+        userAgent: request.headers.get("User-Agent") ?? "",
+        query: url.search.slice(1),
+        edge: {
+          country: cfFull?.country,
+          region: cfFull?.region,
+          region_code: cfFull?.regionCode,
+          city: cfFull?.city,
+          postal_code: cfFull?.postalCode,
+          metro_code: cfFull?.metroCode,
+          latitude: cfFull?.latitude,
+          longitude: cfFull?.longitude,
+          timezone: cfFull?.timezone,
+          asn: cfFull?.asn,
+          as_org: cfFull?.asOrganization,
+          colo: cfFull?.colo,
+        },
+      });
+      const rawFailed = (err: unknown) => {
+        // Raw-tier failure must never affect counting, but it must be visible:
+        // this tier is the DSAR erasure target, the reach/frequency source and
+        // the call-matching input. Recorded as an alert_* side-channel outcome.
+        console.log(
+          `alert_raw_write_error campaign=${imp.campaignId}`,
+          err instanceof Error ? err.message : String(err),
+        );
+        recordRecon(env, "alert_raw_write_error", imp.campaignId);
+      };
+
       if (dedupK !== null) {
         const altKey = await prevSaltDedupKey(env, url, imp);
         const first = await isFirstSeen(env.DEDUP, imp.campaignId, dedupK, ttl, altKey);
         if (!first) {
           end("duplicate", imp.campaignId);
+          // A duplicate is still an ad play (typically the same household
+          // seeing it again), so it is a valid call-matching candidate even
+          // though it is not counted.
+          await writeRawEvent(env, imp, nowSeconds, capture("duplicate")).catch(rawFailed);
           return;
         }
       }
 
       // Count it. blobs ordered per schema; index = campaign_id for equitable
       // per-campaign sampling. doubles[0] = 1 (sum via sum(_sample_interval)).
-      // Blobs 8-9 (ifa_type, platform) are append-only additions; older rows
-      // read back as '' and queries must tolerate that.
+      // Blobs 8-10 (ifa_type, platform, dma) are append-only additions; older
+      // rows read back as '' and queries must tolerate that.
       env.ANALYTICS.writeDataPoint({
         blobs: [
           imp.campaignId,
@@ -127,6 +190,10 @@ async function handlePixel(
           imp.ifaPresent ? "1" : "0",
           imp.ifaType,
           imp.platform,
+          imp.dma,
+          imp.rokuAdvertiserId ?? "",
+          imp.rokuCampaignId ?? "",
+          imp.rokuCreativeId ?? "",
         ],
         doubles: [1],
         indexes: [imp.campaignId],
@@ -135,24 +202,14 @@ async function handlePixel(
 
       // Raw 30-day tier: unsampled, hashed-IFA rows for accurate
       // reach/frequency and DSAR erasure (SPEC §7.3).
-      const rawWrite = writeRawEvent(env, imp, nowSeconds).catch((err) => {
-        // Raw-tier failure must never affect counting, but it must be visible:
-        // this tier is the DSAR erasure target and the reach/frequency source,
-        // so a silent failure leaves a compliance gap. Recorded as an alert_*
-        // side-channel outcome rather than a terminal one.
-        console.log(
-          `alert_raw_write_error campaign=${imp.campaignId}`,
-          err instanceof Error ? err.message : String(err),
-        );
-        recordRecon(env, "alert_raw_write_error", imp.campaignId);
-      });
+      const rawWrite = writeRawEvent(env, imp, nowSeconds, capture("counted")).catch(rawFailed);
 
       // Record into the matching store for call attribution. This holds the RAW
       // ip/ifa (the conversion APIs need them unhashed) for the attribution
       // window only. Every device identifier is "" under LMT so opted-out
       // devices are never device-matched.
       //
-      // The IP follows the RIDA rather than being stored unconditionally: it is
+      // The IP follows the advertising ID rather than being stored unconditionally: it is
       // a device identifier for this purpose, the conversion clients withhold it
       // under LMT anyway (src/lib/capi.ts, src/lib/capi_ua.ts), and a
       // child-directed campaign forces LMT — so storing it would retain a
@@ -161,14 +218,19 @@ async function handlePixel(
       const rawHhId = url.searchParams.get("hh_id") ?? "";
       const rec: ImpressionRecord = {
         ts: nowSeconds,
-        ip: imp.ifaPresent ? trueIp : "",
-        rida: imp.ifaPresent ? rawIfa : "",
-        hhId: imp.ifaPresent ? rawHhId : "",
+        // Roku's attested device IP, already "" when the device opted out or
+        // the macro was unusable. Never CF-Connecting-IP, which on CTV may be
+        // an intermediary rather than the TV.
+        ip: deviceIp,
+        // Roku Ads Manager sends no advertising ID and no household ID; these stay ""
+        // on that platform and carry UA values when the tag is a UA tag.
+        rida: imp.ifaPresent && imp.platform === "ua" ? rawIfa : "",
+        hhId: imp.ifaPresent && imp.platform === "ua" ? rawHhId : "",
         region: cfFull?.region ?? "",
         city: cfFull?.city ?? "",
         postal: "",
         // The device's actual opt-out signal, not the availability of its
-        // identifier. These differ: an unexpanded `[[[RIDA]]]` macro leaves
+        // identifier. These differ: an unexpanded `[[[DEVICE_IP]]]` macro leaves
         // `ifaPresent` false on a device that opted out of nothing, and this
         // field becomes `opt_out` on the conversion payload (src/lib/capi.ts).
         // Deriving it from `ifaPresent` reported a fabricated opt-out to the
@@ -176,7 +238,7 @@ async function handlePixel(
         lmt: imp.lmt,
       };
       // A non-finite window would make the DO's purge cutoff NaN and retain raw
-      // IP/RIDA indefinitely, so fall back rather than propagate NaN.
+      // identifiers indefinitely, so fall back rather than propagate NaN.
       const windowMin = configInt(env.MATCH_WINDOW_MINUTES, 60);
       const recentWrite = recordRecent(env.RECENT, imp.creativeId, rec, windowMin).catch(
         (err) => {

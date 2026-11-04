@@ -19,7 +19,7 @@ const rec = (over: Partial<ImpressionRecord> = {}): ImpressionRecord => ({
 
 function makeStore() {
   const { state, sql, kv, getAlarm } = fakeDoState();
-  return { do: new RecentImpressions(state), sql, kv, getAlarm };
+  return { do: new RecentImpressions(state), state, sql, kv, getAlarm };
 }
 
 const post = (path: string, body: unknown) =>
@@ -36,44 +36,21 @@ describe("RecentImpressions /record", () => {
     expect(sql.imp[0].lmt).toBe(0);
   });
 
-  it("persists the requested window and arms the purge alarm", async () => {
-    const { do: store, kv, getAlarm } = makeStore();
-    await store.fetch(post("/record?window=30", rec()));
-    expect(kv.get("windowMin")).toBe(30);
-    expect(getAlarm()).not.toBeNull();
-  });
-
-  it("falls back to 60 minutes when the window is not a usable number", async () => {
-    // A NaN window made the alarm's cutoff NaN, and `DELETE ... WHERE ts < NaN`
-    // matches nothing — raw IP/RIDA would be retained forever.
-    for (const bad of ["NaN", "abc", "-5", "0", ""]) {
-      const { do: store, kv } = makeStore();
-      await store.fetch(post(`/record?window=${bad}`, rec()));
-      expect(kv.get("windowMin")).toBe(60);
+  it("never arms a purge alarm, whatever window is passed", async () => {
+    for (const w of ["30", "15", "90", "NaN", ""]) {
+      const { do: store, getAlarm } = makeStore();
+      await store.fetch(post(`/record?window=${w}`, rec()));
+      expect(getAlarm(), `window=${w}`).toBeNull();
     }
   });
 
-  it("tracks a lowered window so retention cannot outlive the match window", async () => {
-    // The alarm purges against the *stored* window. Persisting only the first
-    // value ever seen meant lowering MATCH_WINDOW_MINUTES left the instance
-    // retaining raw IP/RIDA on the old, longer window while /match queried the
-    // new one — with no signal that the two had diverged.
-    const { do: store, kv, getAlarm } = makeStore();
-    await store.fetch(post("/record?window=60", rec()));
-    expect(kv.get("windowMin")).toBe(60);
-
-    await store.fetch(post("/record?window=15", rec()));
-    expect(kv.get("windowMin")).toBe(15);
-    // Re-armed immediately so the over-retained rows go on the next tick.
-    expect(getAlarm()).toBeLessThanOrEqual(Date.now());
-  });
-
-  it("tracks a raised window without disarming the purge", async () => {
-    const { do: store, kv, getAlarm } = makeStore();
-    await store.fetch(post("/record?window=30", rec()));
-    await store.fetch(post("/record?window=90", rec()));
-    expect(kv.get("windowMin")).toBe(90);
+  it("cancels an alarm left armed by the previous purging version", async () => {
+    const { do: store, state, getAlarm } = makeStore();
+    // Simulate the old build having armed a purge alarm on this instance.
+    await state.storage.setAlarm(Date.now() + 60_000);
     expect(getAlarm()).not.toBeNull();
+    await store.fetch(post("/record?window=60", rec()));
+    expect(getAlarm()).toBeNull();
   });
 
   it("records an LMT impression with no identifier stored", async () => {
@@ -158,37 +135,31 @@ describe("RecentImpressions /match", () => {
   });
 });
 
-describe("RecentImpressions alarm", () => {
-  it("purges impressions older than the stored window", async () => {
-    const { do: store, sql } = makeStore();
+describe("RecentImpressions retention", () => {
+  it("never deletes rows, even ones far outside the match window", async () => {
+    // Owner decision 2026-11-04: raw IPs are kept permanently. A stale alarm
+    // from the old purging build must not remove anything.
+    const { do: store, sql, kv } = makeStore();
     const now = Math.floor(Date.now() / 1000);
+    kv.set("windowMin", 60);
+    await store.fetch(post("/record?window=60", rec({ ts: now - 90 * 86400 })));
     await store.fetch(post("/record?window=60", rec({ ts: now - 7200 })));
     await store.fetch(post("/record?window=60", rec({ ts: now - 10 })));
 
     await store.alarm();
 
-    expect(sql.imp).toHaveLength(1);
-    expect(sql.imp[0].ts).toBe(now - 10);
+    expect(sql.imp).toHaveLength(3);
+    expect(sql.imp.map((r) => r.ip)).toEqual(["203.0.113.7", "203.0.113.7", "203.0.113.7"]);
   });
 
-  it("falls back to 60 minutes when storage holds a non-finite window", async () => {
-    // Defends against a value written by a previous version of the DO.
-    const { do: store, sql, kv, getAlarm } = makeStore();
-    const now = Math.floor(Date.now() / 1000);
-    kv.set("windowMin", Number.NaN);
-    sql.imp.push({ ts: now - 7200, ip: "", rida: "", hh_id: "", region: "", city: "", postal: "", lmt: 0 });
-
+  it("still excludes retained old rows from a match (window is a filter, not a delete)", async () => {
+    const { do: store } = makeStore();
+    await store.fetch(post("/record?window=60", rec({ ts: NOW - 7200 })));
     await store.alarm();
-
-    expect(sql.imp).toHaveLength(0);
-    expect(getAlarm()).toBeNull();
-  });
-
-  it("reschedules while rows remain", async () => {
-    const { do: store, getAlarm } = makeStore();
-    await store.fetch(post("/record?window=60", rec({ ts: Math.floor(Date.now() / 1000) })));
-    await store.alarm();
-    expect(getAlarm()).not.toBeNull();
+    const m = (await (
+      await store.fetch(post("/match", { callTs: NOW, windowMin: 60, callerState: "", callerPostal: "" }))
+    ).json()) as MatchResult;
+    expect(m.gate).toBe("no_match");
   });
 });
 

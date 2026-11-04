@@ -21,6 +21,37 @@ describe("computeReconHealth", () => {
     expect(h.healthy).toBe(true);
   });
 
+  it("stays green when every beacon is a correct out-of-flight refusal", () => {
+    // A tag left live after a campaign ends refuses every beacon, forever. On
+    // the raw reject ratio that pins health red permanently, which is how an
+    // alert gets muted right before a real outage. The ledger must still close.
+    const h = computeReconHealth(
+      rows(["received", 1000], ["reject_outside_flight", 1000]),
+    );
+    expect(h.rejects).toBe(1000);
+    expect(h.policyRejects).toBe(1000);
+    expect(h.unexpected).toBe(0);
+    expect(h.rejectRatio).toBe(0);
+    expect(h.healthy).toBe(true);
+  });
+
+  it("still fails on genuine rejects mixed in with policy refusals", () => {
+    // Excluding policy refusals must not dilute a real fault: 60 bad signatures
+    // against 100 non-policy beacons is 0.6, over the 0.5 ceiling, even though
+    // against all 1000 received it would have looked like 6%.
+    const h = computeReconHealth(
+      rows(
+        ["received", 1000],
+        ["reject_out_of_market", 900],
+        ["reject_bad_signature", 60],
+        ["counted", 40],
+      ),
+    );
+    expect(h.policyRejects).toBe(900);
+    expect(h.rejectRatio).toBeCloseTo(0.6);
+    expect(h.healthy).toBe(false);
+  });
+
   it("fails on a single scheduled-job alert regardless of beacon volume", () => {
     // A cron alert fires at most once per run, so against a day of healthy
     // beacon traffic its ratio rounds to ~0 and clears any sane ceiling — while

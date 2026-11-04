@@ -3,62 +3,103 @@
 This document describes how the CTV impression tracker handles personal data,
 and how it satisfies the corrections raised in review.
 
+> **Retention policy changed 2026-11-04 (owner decision): data is kept
+> permanently and never deleted.** Where this changes earlier sections:
+>
+> - **R2 raw tier** keeps, unhashed and indefinitely: the raw device IP, the
+>   connecting IP, the user agent, the full query string, and Cloudflare edge
+>   geo (state/city/zip/metro/lat-long/ASN). Deduplicated repeats are kept too,
+>   flagged `outcome: "duplicate"`.
+> - **Both buckets are bucket-locked** (`Indefinite`), and the age-based delete
+>   lifecycle rules (`raw-30d`, `archive-395d`) were removed. A lock blocks
+>   deletes from the API, the Worker, *and* lifecycle rules.
+> - **`RecentImpressions` no longer purges.** The match window filters `/match`
+>   and deletes nothing.
+> - **Consequence for DSAR (§4): the raw-tier erase path now fails**, because
+>   the lock rejects the delete. Honouring an erasure request, or the Roku DPP
+>   §9 termination deletion (≤30 days), now means deliberately removing the lock
+>   for the affected prefix first. That is a manual, owner-approved step.
+> - The tables and text below still describe the earlier
+>   minimization design and are **out of date** where they say "never stored
+>   raw", "30 days", "13 months", "purged" or "window-scoped".
+
 ## 1. What data we handle
 
 | Field | Classification | At rest? |
 |-------|----------------|----------|
-| `ifa` (Roku RIDA) — analytics/reporting | **Personal data** (online identifier) | **Never stored raw** in AE/exports — salted SHA-256 hash only |
-| `ifa` / device IP — **call-matching store** | Personal data | **Raw, window-scoped only** (see §2.1); purged after the attribution window |
-| Device IP — analytics/reporting | Personal data | **Not persisted** in AE/exports; reduced to country |
-| `country` / coarse geo | Coarse geo (from Cloudflare edge) | Stored (not identifying on its own) |
+| Device IP (Roku `[[[DEVICE_IP]]]`) — analytics/reporting | **Personal data** (online identifier) | **Never stored raw** in AE/exports — salted SHA-256 hash only |
+| `ifa` (advertising ID, Universal Ads path only) | **Personal data** (online identifier) | **Never stored raw** in AE/exports — salted SHA-256 hash only |
+| Device IP / `ifa` — **call-matching store** | Personal data | **Raw, window-scoped only** (see §2.1); purged after the attribution window |
+| `country` / `dma` / coarse geo | Coarse geo | Stored (not identifying on its own) |
+| Roku postal code (`[[[POSTAL_CODE]]]`) | Precise location / sensitive under Roku DPP §5 | Per-impression R2 raw only (30 days), not Analytics Engine or long-term aggregates; collect only under the reported written Roku approval |
+| Roku UIDs / encoded creative ID / cachebuster | Campaign metadata | Roku UIDs in AE, R2 raw and aggregate; encoded creative ID and cachebuster in R2 raw only |
 | Caller phone (ANI) | Personal data | **Never stored raw**; hashed (SHA-256) only when sent to Roku |
 | `campaign_id`, `creative_id`, `advertiser_id`, `app_id` | Non-personal | Stored |
 
-The IFA is online personal data under GDPR (Art. 4) and a "unique identifier"
-under CCPA. The original spec's "No PII stored" claim was incorrect and has been
-removed.
+Both an advertising ID and an IP address are online personal data under GDPR
+(Art. 4) and "unique identifiers" under CCPA. The original spec's "No PII
+stored" claim was incorrect and has been removed.
+
+**Which identifier applies depends on the platform.** Roku Ads Manager exposes
+no advertising ID to third-party impression tags, so on that path the device
+identity is a salted hash of the device IP — which identifies a *household*
+rather than a device (see `src/query.ts`). The Universal Ads path receives a
+real advertising ID and a separate Limit Ad Tracking flag.
 
 ## 2. How we minimize
 
-- **Hashing:** the IFA is hashed with a rotating server-side salt
-  (`IFA_HASH_SALT`) before any storage. The raw value never leaves the request
-  handler. The hash is used only for deduplication and reach.
-- **LMT enforcement:** when `lmt=1` (Limit Ad Tracking), the IFA is zeroed, the
-  campaign is child-directed, **or** the identifier arrives as an unexpanded
-  ad-server macro (`[[[RIDA]]]`), we discard the identifier entirely and mark the
-  impression `ifa_present=0`. Such impressions count toward totals but are
-  excluded from device-level reach. Only the first two are an *opt-out signal*
-  sent to the platform: an unexpanded macro is a delivery failure, not a user's
-  choice, so it is never reported as one (§2.1).
+- **Hashing:** the identifier — the device IP on Roku, the advertising ID on
+  Universal Ads — is hashed with a rotating server-side salt (`IFA_HASH_SALT`)
+  before any storage. The raw value never leaves the request handler. The hash
+  is used only for deduplication and reach.
+- **Opt-out enforcement:** we discard the identifier entirely and mark the
+  impression `ifa_present=0` when the campaign is child-directed, or when the
+  platform signals opt-out. On Roku that signal is `device_ip=0.0.0.0`; on
+  Universal Ads it is `lmt=1` or a zeroed advertising ID. Such impressions
+  count toward totals but are excluded from device-level reach.
+- **An unexpanded macro is not an opt-out.** If the identifier arrives as a
+  literal `[[[DEVICE_IP]]]`, or is otherwise malformed, we discard it and count
+  the impression as non-attributable, but we do **not** report an opt-out to
+  the platform: that is a delivery failure, not a user's choice (§2.1).
 - **Frequency capping without an identifier:** non-attributable impressions
-  (the LMT/COPPA/macro cases above) are deduplicated by a coarse key derived
+  (the opt-out/COPPA/macro cases above) are deduplicated by a coarse key derived
   from `SHA-256(salt | "ip:" + device-IP + ":" + hour-bucket)`. It stores no
   identifier, rotates every hour, lives only in the dedup store for the dedup
   window, and exists so opted-out and child-directed traffic cannot be counted
-  without bound. It is **not** addressable by the IFA DSAR path; the short TTL is
-  the erasure mechanism. Set `DEDUP_NON_ATTRIBUTABLE=false` to disable it.
+  without bound. It is **not** addressable by the identifier DSAR path; the
+  short TTL is the erasure mechanism. Set `DEDUP_NON_ATTRIBUTABLE=false` to
+  disable it. Note this key derives from the *connecting* IP, so it still
+  functions when Roku's attested `device_ip` is zeroed or unusable.
 - **No IP persistence (analytics):** for AE/reporting, geolocation is reduced to
-  a 2-letter country code; the raw IP is never written there.
+  a 2-letter country code plus DMA; the raw IP is never written there. Under
+  the user-reported written Roku approval, postal code is captured only in the
+  30-day raw tier, not in AE or the long-term aggregate.
 
-## 2.1 Call-matching store (raw IP/RIDA, window-scoped)
+## 2.1 Call-matching store (raw identifiers, window-scoped)
 
 To attribute phone calls to impressions and send conversions to Roku CAPI (which
-matches on **unhashed** IP and RIDA), the `RecentImpressions` Durable Object
-holds the **raw device IP and raw RIDA** — but **only**:
+matches on **unhashed** identifiers), the `RecentImpressions` Durable Object
+holds the **raw device IP** — and, on the Universal Ads path only, the raw
+advertising ID — but **only**:
 
 - for the attribution window (`MATCH_WINDOW_MINUTES`, default 60 min),
 - scoped per creative,
 - purged by an alarm once older than the window.
 
-LMT/opt-out impressions store **no RIDA** (empty) and are never device-matched;
-any resulting conversion is sent with Roku's `opt_out="true"` (LDU) flag, and
-the matched impression's IP is withheld from the payload along with the RIDA.
-The caller's phone number is **hashed** (never stored raw) and used only to
-satisfy Roku's identifier requirement on zero-match conversions.
+The IP stored here is the one **Roku attests** in `[[[DEVICE_IP]]]`, not the
+connecting IP seen by our edge, so the matching store never records an address
+Roku did not disclose to us.
 
-Only a real opt-out signal — `lmt=1`, or a campaign flagged child-directed — is
+Opt-out impressions store **no identifier** and are never device-matched; any
+resulting conversion is sent with Roku's `opt_out="true"` (LDU) flag, and the
+matched impression's IP is withheld from the payload. The caller's phone number
+is **hashed** (never stored raw) and used only to satisfy Roku's identifier
+requirement on zero-match conversions.
+
+Only a real opt-out signal — `device_ip=0.0.0.0` on Roku, `lmt=1` or a zeroed
+advertising ID on Universal Ads, or a campaign flagged child-directed — is
 reported to the platform as an opt-out. An impression whose identifier was
-unusable for any other reason (an unexpanded macro, a zeroed IFA, an unusable
+unusable for any other reason (an unexpanded macro, a malformed IP, an unusable
 hash salt) also stores no identifier, but its conversion is sent with
 `opt_out="false"`: no user made that choice, and asserting one would misstate it.
 `Impression.lmt` (`src/types.ts`) carries that signal; `ifaPresent` governs
@@ -71,11 +112,11 @@ short-lived by design (storage minimization for the matching purpose).
 
 | Tier | Retention | Contents |
 |------|-----------|----------|
-| RecentImpressions DO | attribution window (~60 min) | **raw** IP/RIDA + geo (call matching only) |
-| Dedup store | dedup window (`DEDUP_WINDOW_HOURS`, 24 h) | salted IFA/IP-derived dedup keys |
-| Analytics Engine | 3 months (platform fixed) | hashed IFA + dimensions |
-| R2 raw | 30 days | hashed IFA + dimensions (reach/replay) |
-| R2 aggregated | 13 months | **no identifiers** — hour/dimension rollups only |
+| RecentImpressions DO | **indefinite** (since 2026-11-04) | **raw** IP/RIDA + geo |
+| Dedup store | dedup window (`DEDUP_WINDOW_HOURS`, 24 h) | salted dedup keys only; expiry here deletes no impression data |
+| Analytics Engine | 3 months (platform fixed, cannot be extended) | hashed IFA + dimensions; every row is also in R2 raw |
+| R2 raw | **indefinite, bucket-locked** (since 2026-11-04) | **raw** device IP, connecting IP, UA, full query, edge geo, hashed IFA + dimensions, counted and duplicate rows |
+| R2 aggregated | **indefinite, bucket-locked** for `dt=` (since 2026-11-04) | hour/dimension rollups |
 
 Raw-tier objects are keyed `dt=YYYY-MM-DD/h=<hash prefix>/hh=HH/<campaign>/<uuid>.json`.
 The `h=` shard sits directly after the date so a DSAR erasure can list one day

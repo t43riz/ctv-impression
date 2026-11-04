@@ -45,6 +45,10 @@ const GROUP_KEYS = [
   "advertiser_id",
   "ifa_present",
   "platform",
+  "dma",
+  "roku_advertiser_id",
+  "roku_campaign_id",
+  "roku_creative_id",
 ];
 
 describe("buildQuery", () => {
@@ -86,6 +90,10 @@ describe("buildQuery", () => {
     expect(sql).toContain("blob4 AS country");
     expect(sql).toContain("blob7 AS ifa_present");
     expect(sql).toContain("blob9 AS platform");
+    expect(sql).toContain("blob11 AS roku_advertiser_id");
+    expect(sql).toContain("blob12 AS roku_campaign_id");
+    expect(sql).toContain("blob13 AS roku_creative_id");
+    expect(sql).not.toContain("roku_postal_code");
   });
 });
 

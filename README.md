@@ -86,9 +86,11 @@ surface still clears the ceiling.
 Set `ALERT_WEBHOOK_URL` (a secret — for most incident tools the URL *is* the
 credential) to have a red nightly health check POSTed somewhere a human reads.
 
-An unexpanded ad-server macro (`[[[RIDA]]]`, `[IFA]`) is treated as a **missing**
-identifier, never as a device id — hashing it would collapse every affected
-beacon into one pseudo-device and silently discard the rest as duplicates.
+An unexpanded ad-server macro (`[[[DEVICE_IP]]]` on Roku, `[IFA]` on Universal
+Ads) is treated as a **missing** identifier, never as a device id — hashing it
+would collapse every affected beacon into one pseudo-device and silently discard
+the rest as duplicates. It is equally never reported as an opt-out: a delivery
+failure is not a user's choice.
 
 ## Layout
 
@@ -177,14 +179,26 @@ The custom domain lives only under `[env.production]`, so a bare
 environment inherits no bindings, `[env.production]` repeats all of them;
 `deploy:check` (also run in CI) is what keeps the two from silently diverging.
 
-Configure R2 lifecycle rules (retention enforcement, SPEC §7.3):
+**Retention: nothing is deleted (owner decision 2026-11-04).** Do **not** add
+age-based delete lifecycle rules to either bucket. Both buckets carry an
+indefinite bucket lock, which blocks deletes and overwrites from the API, the
+Worker, and lifecycle rules alike:
+
+| Bucket | Lock rule | Covers |
+|---|---|---|
+| `impression-raw` | `retain-all-indefinitely` | every object (prefix `""`) |
+| `impression-archive` | `retain-daily-exports-indefinitely` | `dt=` daily exports. `_status/` is left unlocked because the cron overwrites it |
+
+The only lifecycle rule left aborts incomplete multipart uploads after 7 days,
+which removes no stored object. Check the configuration with:
 
 ```bash
-# impression-raw: delete objects after 30 days
-# impression-archive: delete objects after 13 months (395 days)
-# Apply via dashboard (R2 > bucket > Settings > Object lifecycle rules)
-# or `wrangler r2 bucket lifecycle add <bucket> ...`
+npx wrangler r2 bucket lock list impression-raw
+npx wrangler r2 bucket lifecycle list impression-raw
 ```
+
+The `RecentImpressions` matching store keeps every row too. Its match window is
+a query filter, not a purge.
 
 Allowlist a campaign and register a tracking number:
 
@@ -192,6 +206,34 @@ Allowlist a campaign and register a tracking number:
 wrangler kv key put --binding CAMPAIGNS "campaign:camp_spring24" active
 # COPPA: child-directed campaigns are forced to LMT treatment:
 #   wrangler kv key put --binding CAMPAIGNS "campaign:camp_kids" child_directed
+```
+
+**Flight window and market (recommended for any real campaign).** A campaign
+entry may instead be a JSON object, which is what bounds collection to the
+campaign's actual duration as DSA §2(b)(1) requires:
+
+```bash
+wrangler kv key put --binding CAMPAIGNS "campaign:camp_spring24" \
+  '{"status":"active","start":"2026-10-01","end":"2026-12-31","markets":["US"]}'
+```
+
+| Field | Meaning |
+|---|---|
+| `status` | `active` or `child_directed`. Anything else is not allowlisted |
+| `start` / `end` | Inclusive UTC dates (or full timestamps). A bare `end` date covers that whole day. Absent = unbounded |
+| `markets` | Narrows `LICENSED_MARKETS` for this campaign. Absent = inherit |
+
+Beacons outside the window are rejected as `outside_flight`; outside the market,
+as `out_of_market`. Both still return the pixel. Neither counts against the
+health check's reject ratio, because a tag left live after a campaign ends would
+otherwise pin health red forever and mute the alert. They are reported on
+`/admin/health` as `policyRejects`.
+
+> A malformed JSON entry is treated as **not allowlisted**, not as an
+> unrestricted campaign, so a typo in a flight window cannot silently widen the
+> license.
+
+```bash
 wrangler kv key put --binding NUMBERS "number:18005550100" \
   '{"creativeId":"cre_30s_hero","campaignId":"camp_spring24","advertiserId":"adv_acme"}'
 # Universal Ads numbers route conversions to the UA CAPI:

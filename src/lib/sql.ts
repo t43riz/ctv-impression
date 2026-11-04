@@ -74,7 +74,47 @@ export async function querySql<T = Record<string, unknown>>(
   }
 
   // The SQL API returns JSON with a `data` array (using FORMAT JSON).
-  return JSON.parse(text) as SqlResponse<T>;
+  return coerceNumericColumns(JSON.parse(text) as SqlResponse<T>);
+}
+
+/** ClickHouse numeric column types, unwrapping one `Nullable(...)` layer. */
+function isNumericSqlType(type: string): boolean {
+  const inner = /^Nullable\((.+)\)$/.exec(type)?.[1] ?? type;
+  return /^(U?Int(8|16|32|64|128|256)|Float(32|64)|Decimal)/.test(inner);
+}
+
+/**
+ * Convert numeric columns from strings to numbers, in place.
+ *
+ * WAE serializes 64-bit integers as JSON *strings* (`"10"`), because they can
+ * exceed what an IEEE double represents exactly. Every `sum(_sample_interval)`
+ * and `count(DISTINCT ...)` therefore arrives as a string while the row types
+ * declare `number`, and TypeScript cannot catch it across a `JSON.parse` cast.
+ *
+ * Left unconverted, arithmetic silently becomes string concatenation: the
+ * health reconciler's `reduce((a, r) => a + r.events, 0)` produced `"010"`
+ * instead of `10`, so every ledger total was a concatenation of its parts and
+ * the counted-vs-accounted equality could never hold. Coercing at the only read
+ * path keeps the fix in one place instead of at each of the six call sites.
+ */
+function coerceNumericColumns<T>(res: SqlResponse<T>): SqlResponse<T> {
+  const numericCols = (res.meta ?? [])
+    .filter((c) => isNumericSqlType(c.type))
+    .map((c) => c.name);
+  if (numericCols.length === 0) return res;
+
+  for (const row of res.data ?? []) {
+    const r = row as Record<string, unknown>;
+    for (const col of numericCols) {
+      const v = r[col];
+      if (typeof v !== "string") continue;
+      const n = Number(v);
+      // A non-finite parse means the column was not really numeric; leave the
+      // original value rather than substitute NaN, which would poison sums.
+      if (Number.isFinite(n)) r[col] = n;
+    }
+  }
+  return res;
 }
 
 /**

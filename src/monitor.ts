@@ -42,7 +42,16 @@ export interface ReconHealth {
    * health gate (see computeReconHealth).
    */
   countedRatio: number;
-  /** rejects / received. A spike means a broken tag or a probe. */
+  /**
+   * License-required refusals (outside flight window, out of market). Reported
+   * separately because they are correct behaviour, not faults — a non-zero
+   * value usually means a tag is still live after its campaign ended.
+   */
+  policyRejects: number;
+  /**
+   * Fault rejects / received, both excluding `policyRejects`. A spike means a
+   * broken tag or a probe.
+   */
   rejectRatio: number;
   /** alerts / received; 1 when alerts exist with no received beacons at all. */
   alertRatio: number;
@@ -121,6 +130,20 @@ const CALL_REJECTIONS = [
 const CALL_SEND_ERRORS = ["call_capi_error", "call_internal_error"] as const;
 
 /**
+ * Rejections that are the system working as designed rather than a fault.
+ *
+ * A campaign outside its flight window, or an impression served outside the
+ * licensed Market, is a *correct* refusal required by the data license — and
+ * both are open-ended: a tag left live after a campaign ends emits
+ * `reject_outside_flight` for every beacon, indefinitely. On the general reject
+ * ratio that pins health red forever, which mutes the alert exactly as the
+ * `maxAlertRatio` comment above warns. They stay in `rejects` (the ledger must
+ * still close) but are excluded from the ratio that gates health, and are
+ * reported separately so an operator can still see them.
+ */
+const POLICY_REJECTS = ["reject_outside_flight", "reject_out_of_market"] as const;
+
+/**
  * Alerts raised by the scheduled jobs rather than by per-beacon work. Any
  * occurrence is a failure: these fire once per cron run, so they can never
  * reach a meaningful ratio against beacon volume.
@@ -183,6 +206,9 @@ export function computeReconHealth(
   const counted = sum((o) => o === "counted");
   const duplicates = sum((o) => o === "duplicate");
   const rejects = sum((o) => o.startsWith("reject_"));
+  // Correct, license-required refusals. Counted in `rejects` so the ledger
+  // still closes, but held out of the health ratio below.
+  const policyRejects = sum((o) => (POLICY_REJECTS as readonly string[]).includes(o));
   const disabled = sum((o) => o === "disabled");
   const internalErrors = sum((o) => o === "reject_internal");
   const alerts = sum((o) => o.startsWith("alert_"));
@@ -199,7 +225,11 @@ export function computeReconHealth(
   const unexpected = Math.max(0, received - accounted);
 
   const countedRatio = received > 0 ? counted / received : 0;
-  const rejectRatio = received > 0 ? rejects / received : 0;
+  // Policy refusals are excluded from both sides: a window in which every
+  // beacon is a correct out-of-flight refusal should read 0, not 1.
+  const faultRejects = Math.max(0, rejects - policyRejects);
+  const faultDenominator = Math.max(0, received - policyRejects);
+  const rejectRatio = faultDenominator > 0 ? faultRejects / faultDenominator : 0;
   // Alerts with no received beacon at all is not "0%": it is a raw-tier /
   // matching-store failure that produced no ledger traffic, and reporting it as
   // 0 made it indistinguishable from a quiet healthy hour.
@@ -245,6 +275,7 @@ export function computeReconHealth(
     counted,
     duplicates,
     rejects,
+    policyRejects,
     disabled,
     internalErrors,
     alerts,

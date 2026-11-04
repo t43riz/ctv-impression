@@ -133,6 +133,15 @@ DEDUP_NON_ATTRIBUTABLE = "true"
 # Global kill switch (DSA §2(b)). "true" keeps serving the pixel but stops
 # counting and matching.
 INGEST_DISABLED = "false"
+# Markets the data license covers. DSA §3(a) grants a Market-limited license;
+# ours is the United States. A campaign entry in CAMPAIGNS may narrow this
+# further via its "markets" array.
+LICENSED_MARKETS = "US"
+# "true" also rejects beacons whose country cannot be determined. Default counts
+# them: on a US-only buy an unresolved country is far more likely to be a
+# missing COUNTRY macro than real foreign delivery, and discarding genuine
+# delivery is its own compliance problem.
+REJECT_UNKNOWN_MARKET = "false"
 # Device identifiers are attached to a conversion only when the match clears
 # BOTH bounds; otherwise the event is sent phone-only.
 MIN_MATCH_CONFIDENCE = "0.6"
@@ -250,6 +259,8 @@ UA_CAPI_ENDPOINT = ""
 UA_CAPI_MODE = "test"
 DEDUP_NON_ATTRIBUTABLE = "true"
 INGEST_DISABLED = "false"
+LICENSED_MARKETS = "US"
+REJECT_UNKNOWN_MARKET = "false"
 MIN_MATCH_CONFIDENCE = "0.6"
 MAX_MATCH_CANDIDATES = "10"
 HTTP_TIMEOUT_MS = "5000"

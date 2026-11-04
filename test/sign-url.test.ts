@@ -34,8 +34,15 @@ function sign(args: string[], key = KEY): { pathname: string; params: Record<str
     env: { ...process.env, HMAC_SIGNING_KEY: key },
   }).trim();
   // Macro placeholders are appended raw and are not URL-legal, so strip them
-  // before parsing; the signed fields all live before that tail.
-  const [head, query = ""] = out.split("&ifa=")[0].split("?");
+  // before parsing; the signed fields all live before that tail. The tail
+  // starts at the first platform macro: `device_ip` on Roku, `ifa` on UA.
+  const tailStart = Math.min(
+    ...["&device_ip=", "&ifa="]
+      .map((m) => out.indexOf(m))
+      .filter((i) => i >= 0),
+  );
+  const head0 = Number.isFinite(tailStart) ? out.slice(0, tailStart) : out;
+  const [head, query = ""] = head0.split("?");
   const params: Record<string, string> = {};
   for (const pair of query.split("&")) {
     const eq = pair.indexOf("=");
@@ -99,18 +106,39 @@ describe("sign-url.mjs interoperates with the Worker verifier", () => {
     expect(sign(baseArgs).pathname).toBe("/v1/pixel");
   });
 
-  it("emits every macro the Roku tag depends on", () => {
+  it("emits only macros Roku Ads Manager actually supports", () => {
     const url = signRaw(baseArgs);
-    // RAF has no ifa_type token and Roku's identifier is always a RIDA, so the
-    // namespace is sent as a literal. Omitting it leaves blob8 empty and makes
-    // platform mix unmeasurable — confirmed against production.
-    expect(url).toContain("&ifa_type=rida");
-    for (const macro of ["[[[RIDA]]]", "[[[LMT]]]", "[[[APPID]]]", "[[[CACHEBUSTER]]]"]) {
+    for (const macro of [
+      "[[[DEVICE_IP]]]",
+      "[[[COUNTRY]]]",
+      "[[[METRO_CODE]]]",
+      "[[[CACHEBUSTER]]]",
+      "[[[ADVERTISERID]]]",
+      "[[[CAMPAIGNID]]]",
+      "[[[CREATIVEID_URL]]]",
+      "[[[CREATIVEID]]]",
+      "[[[POSTAL_CODE]]]",
+    ]) {
       expect(url).toContain(macro);
+    }
+    // Ads Manager supports no RIDA, LMT or APPID macro. Emitting one leaves
+    // the literal token in the fired URL, which both corrupts the data and
+    // fails pixel certification, so these must never come back.
+    for (const unsupported of ["[[[RIDA]]]", "[[[LMT]]]", "[[[APPID]]]"]) {
+      expect(url, unsupported).not.toContain(unsupported);
     }
     // The UA tokens must not leak into a Roku tag.
     expect(url).not.toContain("[IFA]");
     expect(url).not.toContain("[LIMITADTRACKING]");
+  });
+
+  it("never emits a space, which Roku rejects at creative review", () => {
+    // Roku's tag requirements: HTTPS, no spaces, impression-only.
+    for (const args of [baseArgs, [...baseArgs, "--platform", "ua"]]) {
+      const url = signRaw(args);
+      expect(url).not.toMatch(/\s/);
+      expect(url.startsWith("https://")).toBe(true);
+    }
   });
 
   it("emits IAB macros, not Roku macros, for the UA platform", () => {

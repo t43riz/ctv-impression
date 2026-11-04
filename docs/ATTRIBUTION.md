@@ -9,22 +9,27 @@ Roku as a conversion.
 
 CTV impressions and phone calls share **no common identifier**:
 
-- An **impression** gives us: device IP, RIDA (IFA), creative, geo, timestamp.
+- An **impression** gives us: device IP, creative, geo, timestamp — plus an
+  advertising ID (IFA/RIDA) on the Universal Ads path only. Roku Ads Manager
+  exposes no advertising ID, so there the IP is the sole identifier.
 - A **phone call** gives us: dialed number (DNIS), caller number (ANI), time,
-  duration. **No IP, no RIDA.**
+  duration. **No IP, no advertising ID.**
 
 The only direct link is **dialed number → creative** (one tracking number per
 creative). We have **no device identifier from the call** — only the phone
 number — so we cannot do a deterministic device match. Instead we use a
 **probabilistic time + geo match** against the impressions of that creative,
-pick the single best-guess impression, and send Roku its **IP + RIDA +
-timestamp** (Roku matches on IP/RIDA) together with a **confidence score**. When
-no impression is in-window, we still fire a conversion using the **hashed caller
-phone** so the event is not lost.
+pick the single best-guess impression, and send Roku its **IP + timestamp**
+(plus the advertising ID where one exists) together with a **confidence score**.
+When no impression is in-window, we still fire a conversion using the **hashed
+caller phone** so the event is not lost.
 
 > **This is probabilistic attribution, not deterministic identity resolution.**
-> The IP/RIDA we send is a best guess, not a confirmed device; confidence is
-> scored and sent with every event. See §6 for accuracy notes.
+> The identifiers we send are a best guess, not a confirmed device; confidence
+> is scored and sent with every event. See §6 for accuracy notes.
+>
+> **On Roku this is weaker still.** With no advertising ID, the match rests on
+> an IP that identifies a household rather than a device.
 
 ---
 
