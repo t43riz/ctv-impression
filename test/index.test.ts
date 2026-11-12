@@ -278,6 +278,31 @@ describe("pixel ingest", () => {
     expect(h.recent.get("cre1")).toBeDefined();
   });
 
+  it("files a Roku impression under Roku's creative ID, not the shared tag's", async () => {
+    // Every Roku Ads Manager campaign uses the same signed tag (one creative_id),
+    // so per-creative phone numbers can only be matched on Roku's own ID.
+    const h = makeHarness();
+    await beacon(h.env, { ...baseParams, roku_creative_id: "138618142935" });
+    await beacon(h.env, {
+      ...baseParams,
+      device_ip: "203.0.113.9",
+      roku_creative_id: "222333444555",
+    });
+
+    expect([...h.recent.keys()].sort()).toEqual([
+      "roku-creative:138618142935",
+      "roku-creative:222333444555",
+    ]);
+    expect(h.recentRows("roku-creative:138618142935").map((r) => r.ip)).toEqual([DEVICE_IP]);
+    expect(h.recent.get("cre1")).toBeUndefined();
+  });
+
+  it("falls back to the tag's creative ID when Roku's creative macro did not expand", async () => {
+    const h = makeHarness();
+    await beacon(h.env, { ...baseParams, roku_creative_id: "%ecid!" });
+    expect([...h.recent.keys()]).toEqual(["cre1"]);
+  });
+
   it("treats a replayed beacon as a duplicate and does not double-count", async () => {
     const h = makeHarness();
     await beacon(h.env, baseParams);

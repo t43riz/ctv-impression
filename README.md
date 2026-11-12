@@ -233,8 +233,20 @@ otherwise pin health red forever and mute the alert. They are reported on
 > unrestricted campaign, so a typo in a flight window cannot silently widen the
 > license.
 
+**Roku Ads Manager numbers must set `rokuCreativeId`.** Every Roku campaign
+uses the same signed tag, so the tag's `creative_id` is identical across
+creatives. Impressions are filed for matching under Roku's own creative ID (the
+`roku_creative_id` macro value, visible in Ads Manager and in the R2 raw rows),
+and a number is matched only against the creative it sets. A Roku number
+without `rokuCreativeId` matches only impressions whose Roku creative macro did
+not expand.
+
 ```bash
+# Roku: one number per Roku creative
 wrangler kv key put --binding NUMBERS "number:18005550100" \
+  '{"creativeId":"cre_roku_cert","campaignId":"camp_roku_test","advertiserId":"adv_udonis","rokuCreativeId":"138618142935"}'
+# Without rokuCreativeId the tag's creativeId is used (UA and legacy tags):
+wrangler kv key put --binding NUMBERS "number:18005550101" \
   '{"creativeId":"cre_30s_hero","campaignId":"camp_spring24","advertiserId":"adv_acme"}'
 # Universal Ads numbers route conversions to the UA CAPI:
 #   ... '{"creativeId":"cre_x","campaignId":"camp_y","advertiserId":"adv_z","platform":"ua"}'

@@ -186,6 +186,26 @@ export class RecentImpressions implements DurableObject {
 
 }
 
+/**
+ * Name of the matching store (Durable Object instance) for a creative.
+ *
+ * Roku Ads Manager campaigns all share one signed tag, so the tag's own
+ * `creative_id` is the same for every creative. A per-creative tracking number
+ * therefore has to be matched against the impressions of *Roku's* creative —
+ * the native ID Roku fills in via the tag's `roku_creative_id` macro.
+ *
+ * Both the ingest side (impression) and the call side (number registry entry)
+ * must go through this function so they land on the same instance:
+ *   - impression: `{ creativeId: imp.creativeId, rokuCreativeId: imp.rokuCreativeId }`
+ *   - call:       the `NumberMapping` (`rokuCreativeId` set for Roku numbers)
+ *
+ * Without a Roku creative ID (UA tags, or a Roku macro that did not expand) the
+ * tag's creative ID is used, which is the original per-tag behaviour.
+ */
+export function matchingStoreKey(src: { creativeId: string; rokuCreativeId?: string }): string {
+  return src.rokuCreativeId ? `roku-creative:${src.rokuCreativeId}` : src.creativeId;
+}
+
 /** Helper: record an impression into the creative's matching store. */
 export async function recordRecent(
   ns: DurableObjectNamespace,

@@ -17,7 +17,7 @@ import { execFileSync } from "node:child_process";
 // The route is expected to differ: it lives only under [env.production] so that
 // a bare `wrangler deploy` cannot reach the live domain.
 const NOISE =
-  /^$|wrangler \d|^---|WARNING|out-of-date|Please update|npm install|After installation|Total Upload|Your worker has access|dry-run: exiting|^\s*$/i;
+  /^$|wrangler \d|^---|WARNING|out-of-date|Please update|npm install|After installation|Total Upload|Your worker has access|dry-run: exiting|anonymous telemetry|^\s*$/i;
 
 function bindings(args) {
   let out;
@@ -25,7 +25,15 @@ function bindings(args) {
     out = execFileSync(
       "npx",
       ["wrangler", "deploy", "--dry-run", ...args],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 180_000 },
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 180_000,
+        // Wrangler prints a one-time telemetry notice on its first run only, so
+        // it appeared in just one of the two outputs and read as config drift
+        // (CI failed on every run from 2026-09-16 for this reason).
+        env: { ...process.env, WRANGLER_SEND_METRICS: "false" },
+      },
     );
   } catch (err) {
     // A build/config error in either configuration is itself a drift failure:
