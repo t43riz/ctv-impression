@@ -357,11 +357,14 @@ intentionally skipped/dry-run send.
 | `CALL_HMAC_KEY` | secret | PBX webhook signing key |
 | `NUMBERS` | KV | `number:{e164}` → `{creativeId,campaignId,advertiserId,...}` |
 
-Register a tracking number:
+Register a tracking number. For Roku Ads Manager, set `rokuCreativeId` to
+Roku's native creative ID: all Roku campaigns share one tag, so impressions are
+filed for matching under Roku's creative ID (`matchingStoreKey` in
+`src/recent.ts`), and a number only matches the creative it names.
 
 ```bash
 wrangler kv key put --binding NUMBERS "number:18005550100" \
-  '{"creativeId":"cre_hero","campaignId":"camp_spring","advertiserId":"adv_acme"}'
+  '{"creativeId":"cre_roku_cert","campaignId":"camp_roku_test","advertiserId":"adv_udonis","rokuCreativeId":"138618142935"}'
 ```
 
 ---

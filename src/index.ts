@@ -6,7 +6,7 @@ import {
   nonAttributableDedupKey,
 } from "./lib/beacon";
 import { isFirstSeen } from "./dedup";
-import { recordRecent } from "./recent";
+import { recordRecent, matchingStoreKey } from "./recent";
 import { pixelResponse } from "./lib/pixel";
 import { configInt, postJson } from "./lib/http";
 import { runExport } from "./export";
@@ -240,7 +240,14 @@ async function handlePixel(
       // A non-finite window would make the DO's purge cutoff NaN and retain raw
       // identifiers indefinitely, so fall back rather than propagate NaN.
       const windowMin = configInt(env.MATCH_WINDOW_MINUTES, 60);
-      const recentWrite = recordRecent(env.RECENT, imp.creativeId, rec, windowMin).catch(
+      // Keyed on Roku's own creative ID when present: every Roku campaign shares
+      // one tag, so the tag's creative_id cannot tell creatives apart.
+      const recentWrite = recordRecent(
+        env.RECENT,
+        matchingStoreKey({ creativeId: imp.creativeId, rokuCreativeId: imp.rokuCreativeId }),
+        rec,
+        windowMin,
+      ).catch(
         (err) => {
           // This tier is the source of call attribution, so a silent failure
           // means conversions stop matching with no signal. It does not affect

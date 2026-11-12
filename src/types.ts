@@ -124,6 +124,13 @@ export interface NumberMapping {
   platform?: Platform; // conversion API to fire; defaults to "roku"
   qualifySeconds?: number; // per-number override of QUALIFY_SECONDS
   eventGroupId?: string; // per-number override of CAPI_EVENT_GROUP_ID
+  /**
+   * Roku's native creative ID (the `roku_creative_id` macro value) this number
+   * appears in. Required for Roku Ads Manager numbers: all Roku campaigns share
+   * one tag, so calls are matched against this creative's impressions rather
+   * than the tag's `creativeId`. See `matchingStoreKey` in src/recent.ts.
+   */
+  rokuCreativeId?: string;
 }
 
 /**

@@ -2,7 +2,7 @@ import type { Env, CallEvent, NumberMapping } from "./types";
 import { verifyTimestampedSignature, isPlaceholderSecret } from "./lib/crypto";
 import { configInt, configFloat } from "./lib/http";
 import { isFirstSeen, eraseByHash } from "./dedup";
-import { matchRecent } from "./recent";
+import { matchRecent, matchingStoreKey } from "./recent";
 import { areaCodeToState } from "./lib/phone";
 import { buildCapiPayload, sendToCapi } from "./lib/capi";
 import { buildUaCapiPayload, sendToUaCapi } from "./lib/capi_ua";
@@ -101,6 +101,8 @@ export function isValidNumberMapping(m: unknown): m is NumberMapping {
   if (v.advertiserId !== undefined && !MAPPING_ID_RE.test(v.advertiserId)) return false;
   if (v.platform !== undefined && v.platform !== "roku" && v.platform !== "ua") return false;
   if (v.eventGroupId !== undefined && !MAPPING_ID_RE.test(v.eventGroupId)) return false;
+  // Selects the matching store, so it gets the same shape check as creativeId.
+  if (v.rokuCreativeId !== undefined && !MAPPING_ID_RE.test(v.rokuCreativeId)) return false;
 
   if (v.qualifySeconds !== undefined) {
     // A 0 is meaningful ("every call qualifies") and is kept, but it has to be
@@ -383,7 +385,8 @@ async function handleCallInner(
     const callerState = areaCodeToState(call.ani);
     const match = await matchRecent(
       env.RECENT,
-      mapping.creativeId,
+      // Roku numbers carry Roku's creative ID; see matchingStoreKey.
+      matchingStoreKey(mapping),
       call.startTime,
       windowMin,
       callerState,

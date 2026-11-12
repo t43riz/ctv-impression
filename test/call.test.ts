@@ -313,6 +313,31 @@ describe("handleCall registry validation", () => {
     expect((await handleCall(await h.request(), h.env)).status).toBe(500);
   });
 
+  it("refuses a malformed rokuCreativeId (it selects the matching store)", async () => {
+    const h = withMapping({ creativeId: "cre1", campaignId: "camp1", rokuCreativeId: "a b" });
+    expect((await handleCall(await h.request(), h.env)).status).toBe(500);
+  });
+
+  it("matches a Roku number against Roku's creative, and others against the tag creative", async () => {
+    const run = async (mapping: Record<string, unknown>) => {
+      const shards: string[] = [];
+      const h = makeCallEnv({
+        NUMBERS: fakeKv({ [`number:${DNIS}`]: JSON.stringify(mapping) }),
+        RECENT: fakeDoNamespace(async (shard) => {
+          shards.push(shard);
+          return Response.json(NO_MATCH);
+        }),
+      });
+      await handleCall(await h.request(), h.env);
+      return shards;
+    };
+
+    expect(
+      await run({ creativeId: "cre1", campaignId: "camp1", rokuCreativeId: "138618142935" }),
+    ).toEqual(["roku-creative:138618142935"]);
+    expect(await run({ creativeId: "cre1", campaignId: "camp1" })).toEqual(["cre1"]);
+  });
+
   it("still accepts a well-formed entry with a zero qualifySeconds", async () => {
     // 0 is meaningful ("every call qualifies") and must survive validation.
     const h = withMapping({ creativeId: "cre1", campaignId: "camp1", qualifySeconds: 0 });
