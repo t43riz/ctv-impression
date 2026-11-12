@@ -363,9 +363,11 @@ filed for matching under Roku's creative ID (`matchingStoreKey` in
 `src/recent.ts`), and a number only matches the creative it names.
 
 ```bash
-wrangler kv key put --binding NUMBERS "number:18005550100" \
-  '{"creativeId":"cre_roku_cert","campaignId":"camp_roku_test","advertiserId":"adv_udonis","rokuCreativeId":"138618142935"}'
+wrangler kv key put --binding NUMBERS --env production "number:+18005550100" \
+  '{"creativeId":"roku_138618142935","campaignId":"roku_3118495809","advertiserId":"adv_udonis","platform":"roku","rokuCreativeId":"138618142935"}'
 ```
+
+Full procedure: [`docs/ROKU_NUMBER_REGISTRATION.md`](ROKU_NUMBER_REGISTRATION.md).
 
 ---
 

@@ -242,8 +242,10 @@ without `rokuCreativeId` matches only impressions whose Roku creative macro did
 not expand.
 
 ```bash
-# Roku: one number per Roku creative
-wrangler kv key put --binding NUMBERS "number:18005550100" \
+# Roku: one number per Roku creative. The key must be the dialed number exactly
+# as the call feed sends it (Sparrow uses E.164 with "+"); see
+# docs/ROKU_NUMBER_REGISTRATION.md.
+wrangler kv key put --binding NUMBERS --env production "number:+18005550100" \
   '{"creativeId":"cre_roku_cert","campaignId":"camp_roku_test","advertiserId":"adv_udonis","rokuCreativeId":"138618142935"}'
 # Without rokuCreativeId the tag's creativeId is used (UA and legacy tags):
 wrangler kv key put --binding NUMBERS "number:18005550101" \
